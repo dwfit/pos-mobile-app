@@ -1,0 +1,35 @@
+{
+  "expo": {
+    "name": "POS Mobile",
+    "slug": "pos-mobile",
+    "version": "0.1.0",
+    "orientation": "landscape",
+    "icon": "./assets/icon.png",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#111827"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "sa.com.dwf.posmobile",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#111827"
+      },
+      "permissions": []
+    },
+    "extra": {
+      "apiUrl": "http://192.168.100.245:4000"
+    },
+    "plugins": [
+      "expo-sqlite"
+    ]
+  }
+}
