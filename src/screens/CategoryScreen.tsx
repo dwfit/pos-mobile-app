@@ -73,6 +73,7 @@ type CustomerSummary = {
   name: string;
   phone?: string | null;
 };
+
 type AppliedDiscount = {
   kind: 'AMOUNT' | 'PERCENT';
   value: number;
@@ -81,7 +82,6 @@ type AppliedDiscount = {
   name?: string | null;
   label?: string | null;
 };
-
 
 const PURPLE = '#6d28d9';
 const BLACK = '#000000';
@@ -139,16 +139,35 @@ function subscribeOrdersChanged(
   };
 }
 
-async function registerPosDeviceOnSocket() {
+/* =========================
+   ✅ DeviceInfo helper
+   ========================= */
+
+async function getDeviceInfo(): Promise<{
+  branchId: string | null;
+  brandId: string | null;
+  deviceId: string | null;
+}> {
   try {
     const raw = await AsyncStorage.getItem('deviceInfo');
-    if (!raw) {
-      console.log('WS register (CategoryScreen): no deviceInfo');
-      return;
-    }
+    if (!raw) return { branchId: null, brandId: null, deviceId: null };
     const dev = JSON.parse(raw);
-    const branchId = dev.branchId;
-    const deviceId = dev.id || dev.deviceId;
+
+    // support multiple shapes safely
+    const branchId = dev.branchId ?? null;
+    const brandId = dev.brandId ?? dev.brand?.id ?? null;
+    const deviceId = dev.id ?? dev.deviceId ?? null;
+
+    return { branchId, brandId, deviceId };
+  } catch (e) {
+    console.log('getDeviceInfo parse error (CategoryScreen)', e);
+    return { branchId: null, brandId: null, deviceId: null };
+  }
+}
+
+async function registerPosDeviceOnSocket() {
+  try {
+    const { branchId, deviceId } = await getDeviceInfo();
 
     if (!branchId || !deviceId) {
       console.log('WS register (CategoryScreen): missing branchId/deviceId', {
@@ -171,7 +190,7 @@ async function registerPosDeviceOnSocket() {
 async function playAlertSound() {
   try {
     const { sound } = await Audio.Sound.createAsync(
-      require('../assets/new-order.mp3'),
+      require('../assets/new-order.mp3')
     );
     await sound.playAsync();
   } catch (err) {
@@ -258,8 +277,10 @@ export default function CategoryScreen({
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
 
-  // branchId from deviceInfo (for WS + orders sync)
+  // branchId + brandId + deviceId from deviceInfo
   const [branchId, setBranchId] = useState<string | null>(null);
+  const [brandId, setBrandId] = useState<string | null>(null);
+  const [deviceId, setDeviceId] = useState<string | null>(null); // ✅ FIX
 
   // VAT + POS config
   const [vatRate, setVatRate] = useState<number>(15);
@@ -271,13 +292,13 @@ export default function CategoryScreen({
   // VOID loading
   const [voidLoading, setVoidLoading] = useState(false);
 
-  // 🔔 badge for ORDERS tab (global newOrdersCount from AsyncStorage)
+  // 🔔 badge for ORDERS tab
   const [ordersBadge, setOrdersBadge] = useState(0);
 
-  // 🔄 syncing state for Sync button / background refresh
+  // 🔄 syncing state
   const [syncing, setSyncing] = useState(false);
 
-  // PAYMENTS + DISCOUNT (same as ProductsScreen)
+  // PAYMENTS + DISCOUNT
   const [payments, setPayments] = useState<PaymentEntry[]>([]);
   const [paymentModalVisible, setPaymentModalVisible] = useState(false);
   const [selectedPaymentMethodId, setSelectedPaymentMethodId] =
@@ -292,7 +313,7 @@ export default function CategoryScreen({
   const [showCustomAmount, setShowCustomAmount] = useState(false);
   const [customAmountInput, setCustomAmountInput] = useState('');
 
-  // CUSTOMER selection (same features as ProductsScreen)
+  // CUSTOMER selection
   const [customerModalVisible, setCustomerModalVisible] = useState(false);
   const [customerSearch, setCustomerSearch] = useState('');
   const [customerList, setCustomerList] = useState<CustomerSummary[]>([]);
@@ -306,7 +327,7 @@ export default function CategoryScreen({
   // ORDER TYPE modal
   const [orderTypeModalVisible, setOrderTypeModalVisible] = useState(false);
 
-  const readOnlyCart = false; // Category screen always editable for now
+  const readOnlyCart = false;
 
   /* ------------------------ DISCOUNT LOAD / SYNC ------------------------ */
 
@@ -339,12 +360,10 @@ export default function CategoryScreen({
     }
   }
 
-  // initial load
   useEffect(() => {
     loadAppliedDiscountFromStorage();
   }, []);
 
-  // reload whenever Category screen gains focus (coming back from ProductsScreen)
   useEffect(() => {
     const unsubscribe =
       navigation?.addListener?.('focus', () => {
@@ -356,20 +375,19 @@ export default function CategoryScreen({
     };
   }, [navigation]);
 
-  /* ------------------------ sync orders cache (for OrdersScreen) ------------------------ */
+  /* ------------------------ sync orders cache ------------------------ */
   async function syncOrdersCache() {
     try {
       let currentBranchId = branchId;
 
       if (!currentBranchId) {
-        const raw = await AsyncStorage.getItem('deviceInfo');
-        if (raw) {
-          const dev = JSON.parse(raw);
-          if (dev.branchId) {
-            currentBranchId = dev.branchId;
-            setBranchId(dev.branchId);
-          }
+        const info = await getDeviceInfo();
+        if (info.branchId) {
+          currentBranchId = info.branchId;
+          setBranchId(info.branchId);
         }
+        if (info.brandId) setBrandId(info.brandId);
+        if (info.deviceId) setDeviceId(info.deviceId);
       }
 
       if (!online) {
@@ -384,7 +402,7 @@ export default function CategoryScreen({
 
       console.log(
         '🌐 CategoryScreen syncOrdersCache: fetched orders:',
-        arr.length,
+        arr.length
       );
       const locals: LocalOrder[] = arr.map(toLocalOrder);
       await saveOrdersLocal(locals);
@@ -402,20 +420,17 @@ export default function CategoryScreen({
       setError(null);
 
       try {
-        // read branchId from deviceInfo once
+        // read deviceInfo once
         try {
-          const raw = await AsyncStorage.getItem('deviceInfo');
-          if (raw) {
-            const dev = JSON.parse(raw);
-            if (dev.branchId && !branchId) {
-              setBranchId(dev.branchId);
-            }
-          }
+          const info = await getDeviceInfo();
+          if (info.branchId && !branchId) setBranchId(info.branchId);
+          if (info.brandId && !brandId) setBrandId(info.brandId);
+          if (info.deviceId && !deviceId) setDeviceId(info.deviceId); // ✅ FIX
         } catch (e) {
           console.log('READ deviceInfo ERR (CategoryScreen)', e);
         }
 
-        // 1) LOCAL FIRST – fast UI
+        // 1) LOCAL FIRST
         try {
           const local = await getLocalCategories();
           if (!mounted) return;
@@ -430,16 +445,16 @@ export default function CategoryScreen({
           if (mounted) setLoading(false);
         }
 
-        // 2) If offline → stop here (keep local data)
+        // 2) OFFLINE
         if (!online) {
           console.log('Offline → using only SQLite categories');
           return;
         }
 
-        // 3) ONLINE BACKGROUND SYNC – no blocking UI
+        // 3) ONLINE BACKGROUND SYNC
         setSyncing(true);
         try {
-          await syncMenu(); // refresh menu (categories/products/modifiers) in SQLite
+          await syncMenu();
           if (!mounted) return;
           const fresh = await getLocalCategories();
           const mappedFresh = mapLocalCategories(fresh);
@@ -469,9 +484,9 @@ export default function CategoryScreen({
 
   /* ------------------------ 30-min AUTO SCHEDULER (sync from server) ------------------------ */
   useEffect(() => {
-    if (!online) return; // only sync automatically when online
+    if (!online) return;
 
-    const intervalMs = 30 * 60 * 1000; // 30 minutes
+    const intervalMs = 30 * 60 * 1000;
     console.log('⏰ CategoryScreen auto-sync scheduler started (30 min)');
 
     const id = setInterval(async () => {
@@ -484,9 +499,8 @@ export default function CategoryScreen({
         setFiltered(mappedFresh);
         console.log(
           '🌐 Categories auto-updated from server:',
-          mappedFresh.length,
+          mappedFresh.length
         );
-        // also refresh orders cache in background
         await syncOrdersCache();
       } catch (e) {
         console.log('AUTO syncMenu ERR (CategoryScreen)', e);
@@ -504,7 +518,7 @@ export default function CategoryScreen({
     if (!online) {
       Alert.alert(
         'Offline',
-        'Cannot sync menu while offline. Please check your internet connection.',
+        'Cannot sync menu while offline. Please check your internet connection.'
       );
       return;
     }
@@ -521,7 +535,6 @@ export default function CategoryScreen({
       setFiltered(mappedFresh);
       console.log('🌐 Categories after manual sync:', mappedFresh.length);
 
-      // ⬇️ NEW: also sync orders cache → OrdersScreen gets fresh data
       await syncOrdersCache();
     } catch (e) {
       console.log('MANUAL syncMenu ERR (CategoryScreen)', e);
@@ -542,9 +555,7 @@ export default function CategoryScreen({
         if (!mounted) return;
 
         const vat = (cfg as any)?.vatRate;
-        if (typeof vat === 'number') {
-          setVatRate(vat);
-        }
+        if (typeof vat === 'number') setVatRate(vat);
 
         const methods = (cfg as any)?.paymentMethods;
         if (Array.isArray(methods)) {
@@ -553,12 +564,11 @@ export default function CategoryScreen({
               id: String(m.id),
               code: m.code ?? null,
               name: String(m.name),
-            })),
+            }))
           );
         }
       } catch (err) {
         console.log('POS CONFIG ERR (CategoryScreen):', err);
-        // if offline or fails → keep defaults
       }
     }
 
@@ -568,7 +578,7 @@ export default function CategoryScreen({
     };
   }, []);
 
-  /* ------------------------ POLL BADGE FROM STORAGE (kept) ------------------------ */
+  /* ------------------------ POLL BADGE FROM STORAGE ------------------------ */
   useEffect(() => {
     let mounted = true;
     let timer: NodeJS.Timeout;
@@ -585,7 +595,7 @@ export default function CategoryScreen({
     }
 
     loadBadge();
-    timer = setInterval(loadBadge, 3000); // light polling
+    timer = setInterval(loadBadge, 3000);
 
     return () => {
       mounted = false;
@@ -615,7 +625,6 @@ export default function CategoryScreen({
           const st = String(payload.status || '').toUpperCase();
           const isNew = payload.action === 'created';
 
-          // 🔔 New pending CALLCENTER order → sound + badge + update SQLite/orders cache
           if (ch === 'CALLCENTER' && st === 'PENDING' && isNew) {
             setOrdersBadge((prev) => {
               const next = prev + 1;
@@ -628,7 +637,6 @@ export default function CategoryScreen({
             await playAlertSound();
           }
 
-          // Always refresh orders cache when we get any order change
           await syncOrdersCache();
         } catch (e) {
           console.log('WS orders:changed handler error (CategoryScreen)', e);
@@ -669,13 +677,11 @@ export default function CategoryScreen({
   /* ------------------------ CART TOTALS + PAYMENT CALC ------------------------ */
   const cartItems: CartItem[] = Array.isArray(cart) ? cart : [];
 
-  // base total without discount
   const rawCartTotal: number = cartItems.reduce(
     (sum, it) => sum + calcLineTotal(it),
-    0,
+    0
   );
 
-  // compute discountAmount exactly like ProductsScreen
   let discountAmount = 0;
   if (appliedDiscount && rawCartTotal > 0) {
     if (appliedDiscount.kind === 'AMOUNT') {
@@ -683,7 +689,7 @@ export default function CategoryScreen({
     } else if (appliedDiscount.kind === 'PERCENT') {
       discountAmount = Math.min(
         rawCartTotal,
-        (rawCartTotal * appliedDiscount.value) / 100,
+        (rawCartTotal * appliedDiscount.value) / 100
       );
     }
   }
@@ -710,7 +716,7 @@ export default function CategoryScreen({
       acc[p.methodId].amount += p.amount;
       return acc;
     },
-    {} as Record<string, { methodName: string; amount: number }>,
+    {} as Record<string, { methodName: string; amount: number }>
   );
   const groupedPaymentsArray = Object.values(groupedPayments);
 
@@ -731,7 +737,7 @@ export default function CategoryScreen({
           id: String(c.id),
           name: String(c.name),
           phone: c.phone ?? null,
-        })),
+        }))
       );
     } catch (err) {
       console.log('LOAD CUSTOMERS ERROR (CategoryScreen)', err);
@@ -783,7 +789,7 @@ export default function CategoryScreen({
       if (msg.includes('Customer already exists')) {
         Alert.alert(
           'Customer already exists',
-          'A customer with this phone already exists.',
+          'A customer with this phone already exists.'
         );
       } else {
         Alert.alert('Error', 'Failed to create customer.');
@@ -793,7 +799,7 @@ export default function CategoryScreen({
     }
   }
 
-  /* ------------------------ CART QTY CHANGE (edit in Category screen) ------------------------ */
+  /* ------------------------ CART QTY CHANGE ------------------------ */
   function onChangeQtyInCart(index: number, delta: number) {
     if (readOnlyCart) return;
     setCart((prev: CartItem[]) => {
@@ -810,7 +816,7 @@ export default function CategoryScreen({
     });
   }
 
-  /* ------------------------ PAYMENT FLOW (same as ProductsScreen) ------------------------ */
+  /* ------------------------ PAYMENT FLOW ------------------------ */
 
   function openPaymentModal() {
     if (cartTotal <= 0) return;
@@ -822,7 +828,7 @@ export default function CategoryScreen({
   }
 
   const selectedMethod = paymentMethods.find(
-    (m) => m.id === selectedPaymentMethodId,
+    (m) => m.id === selectedPaymentMethodId
   );
   const selectedPaymentName = selectedMethod?.name || '';
 
@@ -875,12 +881,44 @@ export default function CategoryScreen({
     if (paying) return;
     if (cartTotal <= 0) return;
     if (remaining > 0.01) return;
-    if (!payments.length) return; // must have at least one payment
-  
+    if (!payments.length) return;
+
     try {
       setPaying(true);
-  
+
+      // ✅ ensure brandId/branchId/deviceId are loaded
+      let finalBrandId = brandId;
+      let finalBranchId = branchId;
+      let finalDeviceId = deviceId;
+
+      if (!finalBrandId || !finalBranchId || !finalDeviceId) {
+        const info = await getDeviceInfo();
+        if (!finalBrandId && info.brandId) {
+          finalBrandId = info.brandId;
+          setBrandId(info.brandId);
+        }
+        if (!finalBranchId && info.branchId) {
+          finalBranchId = info.branchId;
+          setBranchId(info.branchId);
+        }
+        if (!finalDeviceId && info.deviceId) {
+          finalDeviceId = info.deviceId;
+          setDeviceId(info.deviceId);
+        }
+      }
+
+      if (!finalDeviceId) {
+        Alert.alert(
+          'Device not activated',
+          'deviceId is missing. Please re-activate this POS device.'
+        );
+        return;
+      }
+
       const basePayload: any = {
+        deviceId: finalDeviceId, // ✅ FIX: REQUIRED by backend
+        branchId: finalBranchId || undefined, // ✅ helpful for backend
+        brandId: finalBrandId || undefined,
         vatRate,
         subtotalEx,
         vatAmount,
@@ -904,32 +942,27 @@ export default function CategoryScreen({
         })),
         payments,
       };
-  
-      // ⭐ only add customerId if a customer is actually selected
+
       if (selectedCustomer?.id) {
         basePayload.customerId = String(selectedCustomer.id);
       }
-  
-      // ⭐ align with backend /pos-orders + /orders/:id/close – expects discountAmount + discount object
+
       if (appliedDiscount && discountAmount > 0) {
         basePayload.discountAmount = discountAmount;
         basePayload.discount = {
-          kind: appliedDiscount.kind,              // "AMOUNT" | "PERCENT"
-          value: appliedDiscount.value,            // 8 or 10 (percent) or amount
-          amount: discountAmount,                  // final discount amount
-          source: appliedDiscount.source ?? null,  // "OPEN" | "PREDEFINED" | null
-          name:
-            appliedDiscount.name ||
-            appliedDiscount.label ||
-            null,
+          kind: appliedDiscount.kind,
+          value: appliedDiscount.value,
+          amount: discountAmount,
+          source: appliedDiscount.source ?? null,
+          name: appliedDiscount.name || appliedDiscount.label || null,
           configId: appliedDiscount.id ?? null,
-          scope: 'ORDER',                          // you can change later if you support item-level
+          scope: 'ORDER',
         };
       } else {
         basePayload.discountAmount = 0;
         basePayload.discount = null;
       }
-  
+
       if (activeOrderId) {
         console.log(
           '📨 CLOSE existing order from CategoryScreen',
@@ -937,42 +970,41 @@ export default function CategoryScreen({
           '\nselectedCustomer =',
           selectedCustomer,
           '\nbasePayload =',
-          JSON.stringify(basePayload, null, 2),
+          JSON.stringify(basePayload, null, 2)
         );
-  
+
         const resp = await post(`/orders/${activeOrderId}/close`, basePayload);
         console.log('✅ ORDER CLOSED (CategoryScreen)', resp);
       } else {
-        const payload = {
+        const payload: any = {
           branchName,
           userName,
           status: 'CLOSED',
           ...basePayload,
         };
-  
+
         console.log(
           '📨 POST /pos/orders (CLOSED from CategoryScreen)',
           '\nselectedCustomer =',
           selectedCustomer,
           '\npayload =',
-          JSON.stringify(payload, null, 2),
+          JSON.stringify(payload, null, 2)
         );
-  
+
         const resp = await post('/pos/orders', payload);
         console.log('✅ ORDER CREATED & CLOSED (CategoryScreen)', resp);
       }
-  
-      // reset state after success
+
       setCart([]);
       setPayments([]);
       setOrderType(null);
       setActiveOrderId?.(null);
       setSelectedCustomer(null);
-  
+
       await AsyncStorage.removeItem(DISCOUNT_STORAGE_KEY);
       setAppliedDiscount(null);
       setDiscountValue('0');
-  
+
       await syncOrdersCache();
     } catch (err) {
       console.log('PAY ERROR (CategoryScreen)', err);
@@ -980,48 +1012,76 @@ export default function CategoryScreen({
       setPaying(false);
     }
   }
-  
-  
-  
-  /* ------------------------ NEW ORDER (park cart as ACTIVE, same as ProductsScreen) ------------------------ */
+
+  /* ------------------------ NEW ORDER (park cart as ACTIVE) ------------------------ */
   async function handleNewOrder() {
     const items = cartItems;
-  
+
     if (activeOrderId) {
       console.log(
-        'NEW pressed while editing existing order – clearing cart, not creating new order (CategoryScreen)',
+        'NEW pressed while editing existing order – clearing cart, not creating new order (CategoryScreen)'
       );
-  
+
       setCart([]);
       setPayments([]);
       setOrderType(null);
       setActiveOrderId?.(null);
       setSelectedCustomer(null);
-  
-      // 🔐 clear any persisted discount
+
       await AsyncStorage.removeItem(DISCOUNT_STORAGE_KEY);
       setAppliedDiscount(null);
       setDiscountValue('0');
-  
+
       return;
     }
-  
+
     if (!items.length) {
       setPayments([]);
       setOrderType(null);
       setActiveOrderId?.(null);
       setSelectedCustomer(null);
-  
-      // 🔐 clear any persisted discount (starting clean)
+
       await AsyncStorage.removeItem(DISCOUNT_STORAGE_KEY);
       setAppliedDiscount(null);
       setDiscountValue('0');
-  
+
       return;
     }
-  
+
     try {
+      // ✅ ensure brandId/branchId/deviceId are loaded
+      let finalBrandId = brandId;
+      let finalBranchId = branchId;
+      let finalDeviceId = deviceId;
+
+      if (!finalBrandId || !finalBranchId || !finalDeviceId) {
+        const info = await getDeviceInfo();
+        if (!finalBrandId && info.brandId) {
+          finalBrandId = info.brandId;
+          setBrandId(info.brandId);
+        }
+        if (!finalBranchId && info.branchId) {
+          finalBranchId = info.branchId;
+          setBranchId(info.branchId);
+        }
+        if (!finalDeviceId && info.deviceId) {
+          finalDeviceId = info.deviceId;
+          setDeviceId(info.deviceId);
+        }
+      }
+
+      if (!finalDeviceId) {
+        Alert.alert(
+          'Device not activated',
+          'deviceId is missing. Please re-activate this POS device.'
+        );
+        return;
+      }
+
       const payload: any = {
+        deviceId: finalDeviceId, // ✅ FIX
+        branchId: finalBranchId || undefined,
+        brandId: finalBrandId || undefined,
         branchName,
         userName,
         orderType,
@@ -1049,7 +1109,7 @@ export default function CategoryScreen({
         payments: [],
         ...(selectedCustomer?.id ? { customerId: selectedCustomer.id } : {}),
       };
-  
+
       if (discountAmount > 0 && appliedDiscount) {
         payload.discountAmount = discountAmount;
         payload.discount = {
@@ -1057,56 +1117,46 @@ export default function CategoryScreen({
           value: appliedDiscount.value,
           amount: discountAmount,
           source: appliedDiscount.source ?? null,
-          name:
-            appliedDiscount.name ||
-            appliedDiscount.label ||
-            null,
+          name: appliedDiscount.name || appliedDiscount.label || null,
           configId: appliedDiscount.id ?? null,
-          scope:
-            appliedDiscount.kind === 'PERCENT'
-              ? 'ORDER'
-              : 'ORDER',
+          scope: 'ORDER',
         };
       } else {
         payload.discountAmount = 0;
         payload.discount = null;
       }
-  
+
       console.log(
         '📨 POST /pos/orders (ACTIVE from CategoryScreen) payload',
         '\nselectedCustomer =',
         selectedCustomer,
         '\npayload =',
-        JSON.stringify(payload, null, 2),
+        JSON.stringify(payload, null, 2)
       );
       const resp = await post('/pos/orders', payload);
       console.log('✅ ACTIVE ORDER CREATED (CategoryScreen)', resp);
-  
+
       setCart([]);
       setPayments([]);
       setOrderType(null);
       setActiveOrderId?.(null);
       setSelectedCustomer(null);
-  
-      // 🔐 clear any persisted discount so next order starts fresh
+
       await AsyncStorage.removeItem(DISCOUNT_STORAGE_KEY);
       setAppliedDiscount(null);
       setDiscountValue('0');
-  
+
       await syncOrdersCache();
     } catch (err) {
       console.log('NEW ORDER ERROR (CategoryScreen)', err);
     }
   }
-  
 
-  /* ------------------------ VOID ORDER FROM CATEGORY (same semantics as ProductsScreen) ------------------------ */
+  /* ------------------------ VOID ORDER FROM CATEGORY ------------------------ */
   function handleVoidPress() {
     const items: CartItem[] = Array.isArray(cart) ? cart : [];
-    if (!items.length) {
-      return;
-    }
-  
+    if (!items.length) return;
+
     Alert.alert('Void order', 'Are you sure you want to void this order?', [
       { text: 'Cancel', style: 'cancel' },
       {
@@ -1115,8 +1165,40 @@ export default function CategoryScreen({
         onPress: async () => {
           try {
             setVoidLoading(true);
-  
+
+            // ✅ ensure brandId/branchId/deviceId are loaded
+            let finalBrandId = brandId;
+            let finalBranchId = branchId;
+            let finalDeviceId = deviceId;
+
+            if (!finalBrandId || !finalBranchId || !finalDeviceId) {
+              const info = await getDeviceInfo();
+              if (!finalBrandId && info.brandId) {
+                finalBrandId = info.brandId;
+                setBrandId(info.brandId);
+              }
+              if (!finalBranchId && info.branchId) {
+                finalBranchId = info.branchId;
+                setBranchId(info.branchId);
+              }
+              if (!finalDeviceId && info.deviceId) {
+                finalDeviceId = info.deviceId;
+                setDeviceId(info.deviceId);
+              }
+            }
+
+            if (!finalDeviceId) {
+              Alert.alert(
+                'Device not activated',
+                'deviceId is missing. Please re-activate this POS device.'
+              );
+              return;
+            }
+
             const payload: any = {
+              deviceId: finalDeviceId, // ✅ FIX
+              branchId: finalBranchId || undefined,
+              brandId: finalBrandId || undefined,
               branchName,
               userName,
               status: 'VOID',
@@ -1144,7 +1226,7 @@ export default function CategoryScreen({
               payments: [],
               ...(selectedCustomer?.id ? { customerId: selectedCustomer.id } : {}),
             };
-  
+
             if (discountAmount > 0 && appliedDiscount) {
               payload.discountAmount = discountAmount;
               payload.discount = {
@@ -1152,41 +1234,34 @@ export default function CategoryScreen({
                 value: appliedDiscount.value,
                 amount: discountAmount,
                 source: appliedDiscount.source ?? null,
-                name:
-                  appliedDiscount.name ||
-                  appliedDiscount.label ||
-                  null,
+                name: appliedDiscount.name || appliedDiscount.label || null,
                 configId: appliedDiscount.id ?? null,
-                scope:
-                  appliedDiscount.kind === 'PERCENT'
-                    ? 'ORDER'
-                    : 'ORDER',
+                scope: 'ORDER',
               };
             } else {
               payload.discountAmount = 0;
               payload.discount = null;
             }
-  
+
             console.log(
               '📨 POST /pos/orders (VOID from CategoryScreen)',
               '\nselectedCustomer =',
               selectedCustomer,
               '\npayload =',
-              JSON.stringify(payload, null, 2),
+              JSON.stringify(payload, null, 2)
             );
             await post('/pos/orders', payload);
-  
+
             setCart([]);
             setPayments([]);
             setOrderType(null);
             setActiveOrderId?.(null);
             setSelectedCustomer(null);
-  
-            // 🔐 clear persisted discount on void as well
+
             await AsyncStorage.removeItem(DISCOUNT_STORAGE_KEY);
             setAppliedDiscount(null);
             setDiscountValue('0');
-  
+
             await syncOrdersCache();
           } catch (err: any) {
             console.log('VOID ORDER ERROR (CategoryScreen)', err);
@@ -1198,7 +1273,6 @@ export default function CategoryScreen({
       },
     ]);
   }
-  
 
   const payDisabled =
     paying || cartTotal <= 0 || remaining > 0.01 || payments.length === 0;
@@ -1217,15 +1291,11 @@ export default function CategoryScreen({
 
       {/* Main two-column layout */}
       <View style={styles.mainRow}>
-        {/* LEFT – Order panel with same cart features as ProductsScreen */}
+        {/* LEFT – Order panel */}
         <View style={styles.orderPanel}>
-          {/* header row with Add Customers + order type */}
           <View style={styles.orderHeaderRow}>
             <Pressable
-              style={[
-                styles.customerButton,
-                readOnlyCart && { opacity: 0.5 },
-              ]}
+              style={[styles.customerButton, readOnlyCart && { opacity: 0.5 }]}
               onPress={openCustomerModal}
               disabled={readOnlyCart}
             >
@@ -1318,10 +1388,10 @@ export default function CategoryScreen({
             )}
           </ScrollView>
 
-          {/* SUMMARY + TOTAL BUTTON (same layout as ProductsScreen) */}
+          {/* SUMMARY + TOTAL BUTTON */}
           <View style={styles.orderFooter}>
             <View style={{ flex: 1 }}>
-              <View className="summary-row" style={styles.summaryRow}>
+              <View style={styles.summaryRow}>
                 <Text style={styles.summaryLabel}>Subtotal (ex-VAT)</Text>
                 <Text style={styles.summaryValue}>{toMoney(subtotalEx)}</Text>
               </View>
@@ -1332,7 +1402,6 @@ export default function CategoryScreen({
                 <Text style={styles.summaryValue}>{toMoney(vatAmount)}</Text>
               </View>
 
-              {/* Discount row – mirror ProductsScreen */}
               <View style={styles.summaryRow}>
                 <Text style={styles.summaryLabel}>
                   {appliedDiscount
@@ -1349,9 +1418,7 @@ export default function CategoryScreen({
                 <View style={styles.discountInputWrap}>
                   <TextInput
                     style={styles.discountInput}
-                    value={
-                      discountAmount > 0 ? `-${toMoney(discountAmount)}` : ''
-                    }
+                    value={discountAmount > 0 ? `-${toMoney(discountAmount)}` : ''}
                     editable={false}
                     pointerEvents="none"
                   />
@@ -1370,7 +1437,6 @@ export default function CategoryScreen({
                 </Pressable>
               )}
 
-              {/* Multi-tender summary */}
               {groupedPaymentsArray.length > 0 && (
                 <View style={styles.paymentsSummaryBox}>
                   {groupedPaymentsArray.map((p) => (
@@ -1402,56 +1468,44 @@ export default function CategoryScreen({
 
         {/* RIGHT – Actions + search + categories */}
         <View style={styles.rightPanel}>
-          {/* Action buttons row */}
           <View style={styles.actionRow}>
-            {[
-              'Print',
-              'Kitchen',
-              'Void',
-              'Discount',
-              'Notes',
-              'Tags',
-              'Sync',
-              'More',
-            ].map((label) => {
-              const isVoid = label === 'Void';
-              const isSync = label === 'Sync';
+            {['Print', 'Kitchen', 'Void', 'Discount', 'Notes', 'Tags', 'Sync', 'More'].map(
+              (label) => {
+                const isVoid = label === 'Void';
+                const isSync = label === 'Sync';
 
-              let onPress: () => void | Promise<void> = () =>
-                console.log(label.toUpperCase(), 'pressed');
+                let onPress: () => void | Promise<void> = () =>
+                  console.log(label.toUpperCase(), 'pressed');
 
-              if (isVoid) {
-                onPress = handleVoidPress;
-              } else if (isSync) {
-                onPress = handleSyncPress;
+                if (isVoid) onPress = handleVoidPress;
+                else if (isSync) onPress = handleSyncPress;
+
+                const disabled = (isVoid && voidLoading) || (isSync && syncing);
+
+                return (
+                  <Pressable
+                    key={label}
+                    style={({ pressed }) => [
+                      styles.actionButton,
+                      pressed && { opacity: 0.8 },
+                      disabled && { opacity: 0.6 },
+                    ]}
+                    onPress={onPress}
+                    disabled={disabled}
+                  >
+                    <Text style={styles.actionText}>
+                      {isVoid && voidLoading
+                        ? 'VOID…'
+                        : isSync && syncing
+                        ? 'SYNC…'
+                        : label.toUpperCase()}
+                    </Text>
+                  </Pressable>
+                );
               }
-
-              const disabled = (isVoid && voidLoading) || (isSync && syncing);
-
-              return (
-                <Pressable
-                  key={label}
-                  style={({ pressed }) => [
-                    styles.actionButton,
-                    pressed && { opacity: 0.8 },
-                    disabled && { opacity: 0.6 },
-                  ]}
-                  onPress={onPress}
-                  disabled={disabled}
-                >
-                  <Text style={styles.actionText}>
-                    {isVoid && voidLoading
-                      ? 'VOID…'
-                      : isSync && syncing
-                      ? 'SYNC…'
-                      : label.toUpperCase()}
-                  </Text>
-                </Pressable>
-              );
-            })}
+            )}
           </View>
 
-          {/* Search categories */}
           <View style={styles.searchBox}>
             <TextInput
               placeholder="Search categories"
@@ -1462,7 +1516,6 @@ export default function CategoryScreen({
             />
           </View>
 
-          {/* Category grid */}
           {loading && (
             <View style={styles.center}>
               <ActivityIndicator size="large" />
@@ -1511,7 +1564,7 @@ export default function CategoryScreen({
         </View>
       </View>
 
-      {/* PAYMENT FOOTER (same as ProductsScreen) */}
+      {/* PAYMENT FOOTER */}
       <View style={styles.paymentFooter}>
         <View style={{ flex: 1 }}>
           {payments.length > 0 && (
@@ -1536,27 +1589,18 @@ export default function CategoryScreen({
           onPress={handlePay}
           disabled={payDisabled}
         >
-          <Text style={styles.payButtonText}>
-            {paying ? 'PAYING...' : 'PAY'}
-          </Text>
+          <Text style={styles.payButtonText}>{paying ? 'PAYING...' : 'PAY'}</Text>
         </Pressable>
       </View>
 
       {/* Bottom POS bar */}
       <View style={styles.bottomBar}>
-        <Pressable
-          style={styles.bottomItem}
-          onPress={() => navigation.navigate('Home')}
-        >
+        <Pressable style={styles.bottomItem} onPress={() => navigation.navigate('Home')}>
           <Text style={styles.bottomIcon}>🏠</Text>
           <Text style={styles.bottomLabel}>HOME</Text>
         </Pressable>
 
-        {/* ORDERS (with badge) */}
-        <Pressable
-          style={[styles.bottomItem]}
-          onPress={() => navigation.navigate('Orders')}
-        >
+        <Pressable style={[styles.bottomItem]} onPress={() => navigation.navigate('Orders')}>
           <Text style={[styles.bottomIcon]}>🧾</Text>
           <Text style={[styles.bottomLabel]}>ORDERS</Text>
 
@@ -1569,17 +1613,11 @@ export default function CategoryScreen({
           )}
         </Pressable>
 
-        <Pressable
-          style={styles.bottomItem}
-          onPress={() => {
-            console.log('TABLES pressed');
-          }}
-        >
+        <Pressable style={styles.bottomItem} onPress={() => console.log('TABLES pressed')}>
           <Text style={styles.bottomIcon}>📋</Text>
           <Text style={styles.bottomLabel}>TABLES</Text>
         </Pressable>
 
-        {/* NEW → same semantics as ProductsScreen NEW */}
         <Pressable style={styles.bottomItem} onPress={handleNewOrder}>
           <Text style={styles.bottomIcon}>＋</Text>
           <Text style={styles.bottomLabel}>NEW</Text>
@@ -1619,7 +1657,7 @@ export default function CategoryScreen({
         </Pressable>
       </Modal>
 
-      {/* PAYMENT MODAL (method + amount) */}
+      {/* PAYMENT MODAL */}
       <Modal
         visible={paymentModalVisible}
         transparent
@@ -1698,10 +1736,7 @@ export default function CategoryScreen({
                       onPress={() => {
                         const val = parseFloat(customAmountInput || '0');
                         if (!val || val <= 0) {
-                          Alert.alert(
-                            'Invalid amount',
-                            'Please enter a valid amount.',
-                          );
+                          Alert.alert('Invalid amount', 'Please enter a valid amount.');
                           return;
                         }
                         completePayment(val);
@@ -1740,7 +1775,6 @@ export default function CategoryScreen({
           <View style={styles.customerCard}>
             <Text style={styles.modalTitle}>Select customer</Text>
 
-            {/* search existing */}
             <View style={styles.customerSearchRow}>
               <TextInput
                 style={styles.customerSearchInput}
@@ -1772,20 +1806,15 @@ export default function CategoryScreen({
                     onPress={() => handleSelectCustomer(c)}
                   >
                     <Text style={styles.customerName}>{c.name}</Text>
-                    {!!c.phone && (
-                      <Text style={styles.customerPhone}>{c.phone}</Text>
-                    )}
+                    {!!c.phone && <Text style={styles.customerPhone}>{c.phone}</Text>}
                   </Pressable>
                 ))}
 
               {!customerLoading && customerList.length === 0 && (
-                <Text style={styles.customerEmptyText}>
-                  No customers found.
-                </Text>
+                <Text style={styles.customerEmptyText}>No customers found.</Text>
               )}
             </ScrollView>
 
-            {/* create new */}
             <View style={styles.customerNewBox}>
               <Text style={styles.customerNewTitle}>Create new</Text>
               <TextInput
@@ -1804,10 +1833,7 @@ export default function CategoryScreen({
                 onChangeText={setNewCustomerPhone}
               />
               <Pressable
-                style={[
-                  styles.customerSaveButton,
-                  savingCustomer && { opacity: 0.7 },
-                ]}
+                style={[styles.customerSaveButton, savingCustomer && { opacity: 0.7 }]}
                 onPress={handleCreateCustomer}
                 disabled={savingCustomer}
               >
@@ -1831,14 +1857,9 @@ export default function CategoryScreen({
 }
 
 /* ------------------------ STYLES ------------------------ */
-// (keep your existing StyleSheet.create(...) here)
-
 
 const styles = StyleSheet.create({
-  root: {
-    flex: 1,
-    backgroundColor: '#f3f4f6',
-  },
+  root: { flex: 1, backgroundColor: '#f3f4f6' },
 
   topBar: {
     paddingHorizontal: 24,
@@ -1847,17 +1868,10 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#e5e7eb',
   },
-  topSub: {
-    fontSize: 12,
-    color: '#6b7280',
-  },
+  topSub: { fontSize: 12, color: '#6b7280' },
 
-  mainRow: {
-    flex: 1,
-    flexDirection: 'row',
-  },
+  mainRow: { flex: 1, flexDirection: 'row' },
 
-  /* LEFT – Order panel */
   orderPanel: {
     width: '30%',
     backgroundColor: '#ffffff',
@@ -1879,11 +1893,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#111827',
   },
-  customerButtonText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#111827',
-  },
+  customerButtonText: { fontSize: 12, fontWeight: '600', color: '#111827' },
   orderTypeTag: {
     paddingHorizontal: 12,
     paddingVertical: 6,
@@ -1891,25 +1901,11 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#111827',
   },
-  orderTypeText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#111827',
-  },
+  orderTypeText: { fontSize: 12, fontWeight: '600', color: '#111827' },
 
-  orderTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    marginBottom: 8,
-    color: '#111827',
-  },
-  orderList: {
-    flex: 1,
-  },
-  orderEmpty: {
-    fontSize: 12,
-    color: '#9ca3af',
-  },
+  orderTitle: { fontSize: 16, fontWeight: '700', marginBottom: 8, color: '#111827' },
+  orderList: { flex: 1 },
+  orderEmpty: { fontSize: 12, color: '#9ca3af' },
 
   orderRowFull: {
     flexDirection: 'row',
@@ -1919,16 +1915,8 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#e5e7eb',
   },
-  orderLineTop: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  orderItemName: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#111827',
-    flex: 1,
-  },
+  orderLineTop: { flexDirection: 'row', alignItems: 'center' },
+  orderItemName: { fontSize: 13, fontWeight: '600', color: '#111827', flex: 1 },
   orderItemSize: {
     fontSize: 12,
     color: '#6b7280',
@@ -1943,11 +1931,7 @@ const styles = StyleSheet.create({
     minWidth: 50,
     textAlign: 'right',
   },
-  orderItemModifiers: {
-    fontSize: 11,
-    color: '#6b7280',
-    marginTop: 2,
-  },
+  orderItemModifiers: { fontSize: 11, color: '#6b7280', marginTop: 2 },
 
   qtyBox: {
     flexDirection: 'row',
@@ -1969,21 +1953,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     backgroundColor: '#f9fafb',
   },
-  qtyMid: {
-    paddingHorizontal: 8,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  qtyText: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: '#111827',
-  },
-  qtyValue: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#111827',
-  },
+  qtyMid: { paddingHorizontal: 8, justifyContent: 'center', alignItems: 'center' },
+  qtyText: { fontSize: 14, fontWeight: '700', color: '#111827' },
+  qtyValue: { fontSize: 13, fontWeight: '600', color: '#111827' },
 
   orderFooter: {
     paddingTop: 8,
@@ -1998,68 +1970,28 @@ const styles = StyleSheet.create({
     marginBottom: 2,
     alignItems: 'center',
   },
-  summaryLabel: {
-    fontSize: 12,
-    color: '#6b7280',
-  },
-  summaryValue: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#111827',
-  },
+  summaryLabel: { fontSize: 12, color: '#6b7280' },
+  summaryValue: { fontSize: 12, fontWeight: '600', color: '#111827' },
 
-  discountInputWrap: {
-    width: 80,
-    height: 28,
-    justifyContent: 'center',
-    alignItems: 'flex-end',
-  },
-  
+  discountInputWrap: { width: 80, height: 28, justifyContent: 'center', alignItems: 'flex-end' },
   discountInput: {
     borderWidth: 0,
     backgroundColor: 'transparent',
     height: 35,
-    paddingHorizontal: 4,   
+    paddingHorizontal: 4,
     textAlign: 'right',
-    color: '#000',             
-    fontSize: 11,               
+    color: '#000',
+    fontSize: 11,
     fontWeight: '500',
   },
-  
-  paymentsSummaryBox: {
-    marginTop: 4,
-    paddingTop: 4,
-    borderTopWidth: 1,
-    borderTopColor: '#e5e7eb',
-  },
-  paymentSummaryRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-  },
-  paymentSummaryLabel: {
-    fontSize: 11,
-    color: '#6b7280',
-  },
-  paymentSummaryValue: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: '#111827',
-  },
-  paymentSummaryTotalRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginTop: 2,
-  },
-  paymentSummaryTotalLabel: {
-    fontSize: 11,
-    color: '#111827',
-    fontWeight: '700',
-  },
-  paymentSummaryTotalValue: {
-    fontSize: 11,
-    color: '#111827',
-    fontWeight: '700',
-  },
+
+  paymentsSummaryBox: { marginTop: 4, paddingTop: 4, borderTopWidth: 1, borderTopColor: '#e5e7eb' },
+  paymentSummaryRow: { flexDirection: 'row', justifyContent: 'space-between' },
+  paymentSummaryLabel: { fontSize: 11, color: '#6b7280' },
+  paymentSummaryValue: { fontSize: 11, fontWeight: '600', color: '#111827' },
+  paymentSummaryTotalRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 2 },
+  paymentSummaryTotalLabel: { fontSize: 11, color: '#111827', fontWeight: '700' },
+  paymentSummaryTotalValue: { fontSize: 11, color: '#111827', fontWeight: '700' },
 
   totalButton: {
     marginLeft: 12,
@@ -2069,28 +2001,11 @@ const styles = StyleSheet.create({
     backgroundColor: BLACK,
     alignItems: 'center',
   },
-  totalButtonLabel: {
-    fontSize: 11,
-    color: '#ffffff',
-    fontWeight: '600',
-  },
-  totalButtonValue: {
-    fontSize: 14,
-    color: '#ffffff',
-    fontWeight: '700',
-  },
+  totalButtonLabel: { fontSize: 11, color: '#ffffff', fontWeight: '600' },
+  totalButtonValue: { fontSize: 14, color: '#ffffff', fontWeight: '700' },
 
-  /* RIGHT – actions + categories grid */
-  rightPanel: {
-    flex: 1,
-    paddingHorizontal: 20,
-    paddingVertical: 14,
-  },
-  actionRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    marginBottom: 12,
-  },
+  rightPanel: { flex: 1, paddingHorizontal: 20, paddingVertical: 14 },
+  actionRow: { flexDirection: 'row', flexWrap: 'wrap', marginBottom: 12 },
   actionButton: {
     height: 44,
     minWidth: 80,
@@ -2102,11 +2017,7 @@ const styles = StyleSheet.create({
     marginRight: 8,
     marginBottom: 8,
   },
-  actionText: {
-    color: '#ffffff',
-    fontSize: 11,
-    fontWeight: '600',
-  },
+  actionText: { color: '#ffffff', fontSize: 11, fontWeight: '600' },
 
   searchBox: {
     height: 40,
@@ -2118,22 +2029,11 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     marginBottom: 12,
   },
-  searchInput: {
-    fontSize: 13,
-    color: '#111827',
-  },
+  searchInput: { fontSize: 13, color: '#111827' },
 
-  center: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
+  center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
 
-  grid: {
-    paddingBottom: 24,
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-  },
+  grid: { paddingBottom: 24, flexDirection: 'row', flexWrap: 'wrap' },
   categoryTile: {
     width: '22%',
     marginRight: 12,
@@ -2150,11 +2050,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
-  categoryImage: {
-    width: '100%',
-    height: '100%',
-    resizeMode: 'cover',
-  },
+  categoryImage: { width: '100%', height: '100%', resizeMode: 'cover' },
   categoryPlaceholder: {
     width: '50%',
     height: '50%',
@@ -2163,11 +2059,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
-  categoryPlaceholderText: {
-    color: '#6b7280',
-    fontSize: 12,
-    fontWeight: '600',
-  },
+  categoryPlaceholderText: { color: '#6b7280', fontSize: 12, fontWeight: '600' },
   categoryName: {
     paddingHorizontal: 8,
     paddingVertical: 6,
@@ -2177,7 +2069,6 @@ const styles = StyleSheet.create({
     color: '#111827',
   },
 
-  /* Payment footer */
   paymentFooter: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -2187,49 +2078,15 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: '#e5e7eb',
   },
-  remainingLabel: {
-    fontSize: 12,
-    color: '#6b7280',
-    marginRight: 8,
-  },
-  remainingValue: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: '#111827',
-    marginRight: 12,
-  },
-  changeLabel: {
-    fontSize: 12,
-    color: '#6b7280',
-    marginRight: 8,
-  },
-  changeValue: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: '#16a34a',
-    marginRight: 12,
-  },
-  clearPaymentsText: {
-    fontSize: 11,
-    color: '#b91c1c',
-    fontWeight: '600',
-  },
-  payButton: {
-    paddingHorizontal: 18,
-    paddingVertical: 10,
-    borderRadius: 999,
-    backgroundColor: '#16a34a',
-  },
-  payButtonDisabled: {
-    backgroundColor: '#9ca3af',
-  },
-  payButtonText: {
-    color: '#ffffff',
-    fontSize: 13,
-    fontWeight: '700',
-  },
+  remainingLabel: { fontSize: 12, color: '#6b7280', marginRight: 8 },
+  remainingValue: { fontSize: 14, fontWeight: '700', color: '#111827', marginRight: 12 },
+  changeLabel: { fontSize: 12, color: '#6b7280', marginRight: 8 },
+  changeValue: { fontSize: 14, fontWeight: '700', color: '#16a34a', marginRight: 12 },
+  clearPaymentsText: { fontSize: 11, color: '#b91c1c', fontWeight: '600' },
+  payButton: { paddingHorizontal: 18, paddingVertical: 10, borderRadius: 999, backgroundColor: '#16a34a' },
+  payButtonDisabled: { backgroundColor: '#9ca3af' },
+  payButtonText: { color: '#ffffff', fontSize: 13, fontWeight: '700' },
 
-  /* Bottom POS bar */
   bottomBar: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -2240,19 +2097,9 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: '#e5e7eb',
   },
-  bottomItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  bottomIcon: {
-    fontSize: 18,
-    marginRight: 6,
-  },
-  bottomLabel: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#111827',
-  },
+  bottomItem: { flexDirection: 'row', alignItems: 'center' },
+  bottomIcon: { fontSize: 18, marginRight: 6 },
+  bottomLabel: { fontSize: 12, fontWeight: '600', color: '#111827' },
   bottomBadge: {
     backgroundColor: 'red',
     borderRadius: 999,
@@ -2263,30 +2110,16 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  bottomBadgeText: {
-    color: '#ffffff',
-    fontSize: 11,
-    fontWeight: '700',
-  },
+  bottomBadgeText: { color: '#ffffff', fontSize: 11, fontWeight: '700' },
 
-  /* Modals shared */
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.45)',
     justifyContent: 'center',
     alignItems: 'center',
   },
-  modalCardBase: {
-    backgroundColor: '#ffffff',
-    borderRadius: 14,
-    padding: 16,
-  },
-  modalTitle: {
-    fontSize: 18,
-    fontWeight: '700',
-    marginBottom: 4,
-    color: '#111827',
-  },
+  modalCardBase: { backgroundColor: '#ffffff', borderRadius: 14, padding: 16 },
+  modalTitle: { fontSize: 18, fontWeight: '700', marginBottom: 4, color: '#111827' },
   modalClose: {
     marginTop: 12,
     alignSelf: 'flex-end',
@@ -2295,13 +2128,8 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     backgroundColor: '#111827',
   },
-  modalCloseText: {
-    color: '#ffffff',
-    fontSize: 13,
-    fontWeight: '600',
-  },
+  modalCloseText: { color: '#ffffff', fontSize: 13, fontWeight: '600' },
 
-  /* Order type modal */
   orderTypeCard: {
     width: 320,
     backgroundColor: '#ffffff',
@@ -2321,10 +2149,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  orderTypeRowText: {
-    fontSize: 15,
-    color: '#111827',
-  },
+  orderTypeRowText: { fontSize: 15, color: '#111827' },
   orderTypeTitle: {
     paddingVertical: 10,
     paddingHorizontal: 16,
@@ -2336,73 +2161,20 @@ const styles = StyleSheet.create({
     borderBottomColor: '#e5e7eb',
   },
 
-  /* Payment modal */
-  paymentCard: {
-    width: '30%',
-    maxHeight: '80%',
-    backgroundColor: '#ffffff',
-    borderRadius: 14,
-    padding: 16,
-  },
-  paymentMethodRow: {
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f3f4f6',
-  },
-  paymentMethodText: {
-    fontSize: 14,
-    color: '#111827',
-  },
+  paymentCard: { width: '30%', maxHeight: '80%', backgroundColor: '#ffffff', borderRadius: 14, padding: 16 },
+  paymentMethodRow: { paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#f3f4f6' },
+  paymentMethodText: { fontSize: 14, color: '#111827' },
 
-  amountCard: {
-    width: '40%',
-    maxHeight: '40%',
-    backgroundColor: '#ffffff',
-    borderRadius: 14,
-    padding: 16,
-  },
-  amountHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'baseline',
-    marginBottom: 8,
-  },
-  amountRemainingText: {
-    fontSize: 12,
-    color: '#6b7280',
-  },
-  amountRow: {
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f3f4f6',
-  },
-  amountText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#111827',
-  },
-  amountCancelRow: {
-    marginTop: 10,
-    paddingVertical: 10,
-  },
-  amountCancelText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#b91c1c',
-    textAlign: 'center',
-  },
+  amountCard: { width: '30%', maxHeight: '80%', backgroundColor: '#ffffff', borderRadius: 14, padding: 16 },
+  amountHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 10 },
+  amountRemainingText: { fontSize: 12, color: '#6b7280' },
+  amountRow: { paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#f3f4f6' },
+  amountText: { fontSize: 12, fontWeight: '700', color: '#111827' },
+  amountCancelRow: { marginTop: 10, paddingVertical: 10 },
+  amountCancelText: { fontSize: 14, fontWeight: '600', color: '#b91c1c', textAlign: 'center' },
 
-  customAmountBox: {
-    marginTop: 10,
-    paddingTop: 8,
-    borderTopWidth: 1,
-    borderTopColor: '#e5e7eb',
-  },
-  customLabel: {
-    fontSize: 12,
-    color: '#6b7280',
-    marginBottom: 4,
-  },
+  customAmountBox: { marginTop: 10, paddingTop: 8, borderTopWidth: 1, borderTopColor: '#e5e7eb' },
+  customLabel: { fontSize: 12, color: '#6b7280', marginBottom: 4 },
   customInput: {
     borderWidth: 1,
     borderColor: '#d1d5db',
@@ -2413,33 +2185,11 @@ const styles = StyleSheet.create({
     color: '#111827',
     marginBottom: 8,
   },
-  customApplyButton: {
-    alignSelf: 'flex-end',
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 999,
-    backgroundColor: BLACK,
-  },
-  customApplyText: {
-    color: '#ffffff',
-    fontSize: 13,
-    fontWeight: '600',
-  },
+  customApplyButton: { alignSelf: 'flex-end', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999, backgroundColor: BLACK },
+  customApplyText: { color: '#ffffff', fontSize: 13, fontWeight: '600' },
 
-  /* Customers modal */
-  customerCard: {
-    width: '35%',
-    maxHeight: '85%',
-    backgroundColor: '#ffffff',
-    borderRadius: 14,
-    padding: 16,
-  },
-  customerSearchRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 8,
-    marginBottom: 8,
-  },
+  customerCard: { width: '35%', maxHeight: '85%', backgroundColor: '#ffffff', borderRadius: 14, padding: 16 },
+  customerSearchRow: { flexDirection: 'row', alignItems: 'center', marginTop: 8, marginBottom: 8 },
   customerSearchInput: {
     flex: 1,
     borderWidth: 1,
@@ -2451,53 +2201,15 @@ const styles = StyleSheet.create({
     color: '#111827',
     marginRight: 8,
   },
-  customerSearchButton: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 999,
-    backgroundColor: BLACK,
-  },
-  customerSearchButtonText: {
-    color: '#ffffff',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  customerLoadingBox: {
-    paddingVertical: 16,
-    alignItems: 'center',
-  },
-  customerRow: {
-    paddingVertical: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f3f4f6',
-  },
-  customerName: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#111827',
-  },
-  customerPhone: {
-    fontSize: 12,
-    color: '#6b7280',
-    marginTop: 2,
-  },
-  customerEmptyText: {
-    fontSize: 12,
-    color: '#6b7280',
-    marginTop: 8,
-  },
-  customerNewBox: {
-    marginTop: 10,
-    paddingTop: 10,
-    borderTopWidth: 1,
-    borderTopColor: '#e5e7eb',
-  },
-  customerNewTitle: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#111827',
-    marginBottom: 4,
-  },
+  customerSearchButton: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999, backgroundColor: BLACK },
+  customerSearchButtonText: { color: '#ffffff', fontSize: 12, fontWeight: '600' },
+  customerLoadingBox: { paddingVertical: 16, alignItems: 'center' },
+  customerRow: { paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: '#f3f4f6' },
+  customerName: { fontSize: 14, fontWeight: '600', color: '#111827' },
+  customerPhone: { fontSize: 12, color: '#6b7280', marginTop: 2 },
+  customerEmptyText: { fontSize: 12, color: '#6b7280', marginTop: 8 },
+  customerNewBox: { marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: '#e5e7eb' },
+  customerNewTitle: { fontSize: 13, fontWeight: '600', color: '#111827', marginBottom: 4 },
   customerInput: {
     borderWidth: 1,
     borderColor: '#e5e7eb',
@@ -2508,23 +2220,7 @@ const styles = StyleSheet.create({
     color: '#111827',
     marginBottom: 6,
   },
-  customerSaveButton: {
-    alignSelf: 'flex-end',
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 999,
-    backgroundColor: BLACK,
-  },
-  customerSaveText: {
-    color: '#ffffff',
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  removeDiscountText: {
-    marginTop: 4,
-    fontSize: 12,
-    color: '#b91c1c',
-    textAlign: 'right',
-  },
-
-}); 
+  customerSaveButton: { alignSelf: 'flex-end', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999, backgroundColor: BLACK },
+  customerSaveText: { color: '#ffffff', fontSize: 13, fontWeight: '600' },
+  removeDiscountText: { marginTop: 4, fontSize: 12, color: '#b91c1c', textAlign: 'right' },
+});

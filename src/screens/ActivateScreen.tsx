@@ -14,75 +14,115 @@ import Constants from 'expo-constants';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { post } from '../lib/api';
 import { setToken } from '../lib/auth';
-
-// initial menu sync (pulls data into SQLite)
 import { syncMenu } from '../sync/menuSync';
 
+/* ------------------------ Enterprise error mapping ------------------------ */
+function friendlyActivationError(err: any) {
+  const apiMessage = err?.response?.data?.message || err?.data?.message || null;
+  if (apiMessage && typeof apiMessage === 'string' && apiMessage.trim()) {
+    return apiMessage.trim();
+  }
+
+  const apiError = err?.response?.data?.error || err?.data?.error || '';
+  const msg = String(err?.message || '');
+  const raw = `${apiError} ${msg}`.toLowerCase();
+
+  if (
+    raw.includes('invalid_brand_code') ||
+    raw.includes('invalid_code') ||
+    raw.includes('invalid_code_or_brand_mismatch') ||
+    raw.includes('brand_mismatch')
+  ) {
+    return 'Brand code or activation code is invalid. Please verify and try again.';
+  }
+
+  if (raw.includes('device_missing_branch')) {
+    return 'This device is not assigned to a branch. Please contact the administrator.';
+  }
+
+  if (raw.includes('network') || raw.includes('fetch') || raw.includes('timeout')) {
+    return 'Unable to reach the activation service. Please check your internet connection and try again.';
+  }
+
+  return 'Activation failed. Please try again.';
+}
+
 export default function ActivateScreen({ navigation }: any) {
-  const [deviceId, setDeviceId] = useState('');
-  const [key, setKey] = useState('');
+  const [brandCode, setBrandCode] = useState('');
+  const [activationCode, setActivationCode] = useState('');
   const [loading, setLoading] = useState(false);
 
   async function onActivate() {
-    // normalize: trim + uppercase (common for activation codes)
-    const trimmedKey = key.trim().toUpperCase();
+    const brand = brandCode.trim().toUpperCase();
+    const code = activationCode.trim();
 
-    if (!trimmedKey) {
-      Alert.alert('Activation', 'Please enter activation key.');
+    if (!brand) {
+      Alert.alert('Activation required', 'Please enter the Brand Code.');
+      return;
+    }
+
+    if (!/^\d{6}$/.test(code)) {
+      Alert.alert('Activation required', 'Please enter the 6-digit activation code.');
       return;
     }
 
     try {
       setLoading(true);
 
-      const payload: any = {
-        // send BOTH so backend can choose what it wants
-        key: trimmedKey,
-        code: trimmedKey,
+      const payload = {
+        brandCode: brand,
+        code,
         platform: Platform.OS === 'android' ? 'android' : 'ios',
         appVersion: Constants?.expoConfig?.version || '0.1.0',
       };
 
-      const trimmedDeviceId = deviceId.trim();
-      if (trimmedDeviceId) {
-        payload.deviceId = trimmedDeviceId;
-      }
-
-      // Call backend
       const r: any = await post('/devices/pos/activate', payload);
+      console.log('✅ ACTIVATE RESPONSE:', JSON.stringify(r, null, 2));
 
-      // Save auth token if you use it
-      if (r.token) {
+      // 🔐 Save device token
+      if (r?.token) {
         await setToken(r.token);
       }
 
-      // Save device info for later use (branch, device type, etc.)
-      if (r.device) {
-        await AsyncStorage.setItem('deviceInfo', JSON.stringify(r.device));
+      // 💾 Save device info (now includes brand + branch)
+      if (r?.device) {
+        const deviceInfoToStore = {
+          ...r.device,
+
+          // backend will now send these (after you update devices.ts)
+          brand: r?.brand ?? null,   // { id, code, name }
+          branch: r?.branch ?? null, // { id, name }
+
+          // easy fields for UI
+          brandId: r?.brand?.id ?? null,
+          brandCode: r?.brand?.code ?? brand ?? null,
+          brandName: r?.brand?.name ?? null,
+
+          branchId: r?.device?.branchId ?? r?.branch?.id ?? null,
+          branchName: r?.branch?.name ?? null,
+
+          updatedAt: r?.updatedAt ?? null,
+        };
+
+        await AsyncStorage.setItem('deviceInfo', JSON.stringify(deviceInfoToStore));
       }
 
-      // Mark device as activated (one time)
+      // ✅ Mark activated
       await AsyncStorage.setItem('deviceActivated', '1');
 
-      // Initial menu sync (optional but recommended)
+      // 🔄 Initial menu sync
       try {
         await syncMenu();
-      } catch (syncErr) {
-        console.log('Initial menu sync after activation failed:', syncErr);
-        // don't block activation for this
+      } catch (err) {
+        console.log('Initial menu sync failed:', err);
       }
 
-      Alert.alert('Activated', 'Device is now active', [
-        {
-          text: 'OK',
-          onPress: () => navigation.replace('Home'),
-        },
+      Alert.alert('Device activated', 'Activation completed successfully.', [
+        { text: 'OK', onPress: () => navigation.replace('Home') },
       ]);
     } catch (e: any) {
       console.log('ACTIVATE ERR', e);
-      const msg =
-        (e && e.message) || 'Unable to activate device.';
-      Alert.alert('Activation failed', msg);
+      Alert.alert('Activation failed', friendlyActivationError(e));
     } finally {
       setLoading(false);
     }
@@ -90,63 +130,52 @@ export default function ActivateScreen({ navigation }: any) {
 
   return (
     <View style={styles.root}>
-      {/* LEFT info / branding */}
       <View style={styles.infoPane}>
         <Text style={styles.appTitle}>DWF POS</Text>
         <Text style={styles.appSubtitle}>Device activation</Text>
 
         <View style={styles.infoBox}>
+          <Text style={styles.infoText}>• Enter Brand Code .</Text>
           <Text style={styles.infoText}>
-            • Ask your administrator for a 6-digit activation key.
+            • Enter the 6-digit activation code provided by Admin.
           </Text>
-          <Text style={styles.infoText}>
-            • This links the tablet to a specific branch and device profile.
-          </Text>
-          <Text style={styles.infoText}>
-            • After activation, you can log in using your cashier PIN.
-          </Text>
+          <Text style={styles.infoText}>• Brand Code and activation code must match.</Text>
           <Text style={[styles.infoText, { marginTop: 8, opacity: 0.8 }]}>
-            • Internet is required only for activation & syncing. After
-            that, POS works from local data (offline).
+            • Internet required only for activation & syncing.
           </Text>
         </View>
       </View>
 
-      {/* RIGHT activation card */}
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Activate device</Text>
-        <Text style={styles.cardSubtitle}>
-          Enter the activation key provided by Admin.
-        </Text>
+        <Text style={styles.cardSubtitle}>Enter Brand Code and activation code.</Text>
 
         <TextInput
-          value={deviceId}
-          onChangeText={setDeviceId}
-          placeholder="Device ID (optional)"
-          placeholderTextColor="#64748b"
-          autoCapitalize="none"
-          style={styles.input}
-        />
-
-        <TextInput
-          value={key}
-          onChangeText={setKey}
-          placeholder="Activation Key"
+          value={brandCode}
+          onChangeText={setBrandCode}
+          placeholder="Brand Code"
           placeholderTextColor="#64748b"
           autoCapitalize="characters"
           style={styles.input}
         />
 
+        <TextInput
+          value={activationCode}
+          onChangeText={(v) => setActivationCode(v.replace(/[^\d]/g, ''))}
+          placeholder="Activation Code"
+          placeholderTextColor="#64748b"
+          keyboardType="number-pad"
+          maxLength={6}
+          style={styles.input}
+        />
+
         <Pressable
-          disabled={loading || !key.trim()}
+          disabled={loading || !brandCode.trim() || activationCode.trim().length !== 6}
           onPress={onActivate}
-          style={({ pressed }) => {
-            const highlight = loading || !key.trim() || pressed;
-            return [
-              styles.activateButton,
-              highlight ? styles.activateButtonPressed : null,
-            ];
-          }}
+          style={({ pressed }) => [
+            styles.activateButton,
+            (loading || pressed) && styles.activateButtonPressed,
+          ]}
         >
           {loading ? (
             <ActivityIndicator color="#052e16" />

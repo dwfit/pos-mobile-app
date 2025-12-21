@@ -468,7 +468,9 @@ export default function OrdersScreen({
       setCart(newCart);
       setActiveOrderId(o.id);
 
+      // ✅ FIX: pass orderId to Products so it never “forgets” and creates a new order
       navigation.navigate('Products', {
+        orderId: o.id, // ✅ added
         categoryId: firstCategoryId ?? '',
         categoryName: isCallcenter ? 'Callcenter Order' : 'Re-opened Order',
         reopenFromCallcenter: isCallcenter,

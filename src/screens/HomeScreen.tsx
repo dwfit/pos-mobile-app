@@ -9,12 +9,8 @@ import {
   Alert,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { post } from '../lib/api';
-
-// ✅ token helpers (access + refresh) – new
+import { post, get } from '../lib/api';
 import { saveTokens, clearAllTokens } from '../lib/auth';
-
-// ✅ Expo SQLite helpers
 import { getDb, initDatabase } from '../database/db';
 
 const PIN_LENGTH = 5;
@@ -28,18 +24,14 @@ type LocalUser = {
   pin?: string | null;
   branchId?: string | null;
   isActive?: boolean;
-  // 🔹 cached permissions for offline login
   permissions?: string[];
 };
 
 /* -------------------- SQLITE HELPERS -------------------- */
 
 async function ensureUsersTable() {
-  // Make sure DB is ready (safe even if already init)
   await initDatabase();
   const db = getDb();
-
-  // original definition (without permissions column)
   await db.runAsync(`
     CREATE TABLE IF NOT EXISTS users_cache (
       id        TEXT PRIMARY KEY,
@@ -54,29 +46,22 @@ async function ensureUsersTable() {
     );
   `);
 
-  // 🔹 try to add permissions column (idempotent)
+  // add permissions column safely
   try {
-    await db.runAsync(
-      `ALTER TABLE users_cache ADD COLUMN permissions TEXT;`,
-    );
-  } catch (e) {
-    // will fail if column already exists – ignore
-    // console.log('users_cache.permissions already exists or alter failed:', e);
+    await db.runAsync(`ALTER TABLE users_cache ADD COLUMN permissions TEXT;`);
+  } catch {
+    // ignore if already exists
   }
 }
 
 async function saveUsersToSQLite(users: any[], branchId: string): Promise<void> {
-  if (!branchId || !Array.isArray(users) || users.length === 0) {
-    return;
-  }
+  if (!branchId || !Array.isArray(users) || users.length === 0) return;
 
   await initDatabase();
   const db = getDb();
-
   const now = new Date().toISOString();
 
   await db.withTransactionAsync(async () => {
-    // delete old users for that branch
     await db.runAsync('DELETE FROM users_cache WHERE branchId = ?;', [branchId]);
 
     for (const u of users) {
@@ -87,8 +72,6 @@ async function saveUsersToSQLite(users: any[], branchId: string): Promise<void> 
       const roleName = u.roleName ?? null;
       const pin = u.pin ?? u.loginPin ?? null;
       const isActive = u.isActive === false ? 0 : 1;
-
-      // 🔹 normalize permissions array
       const permissions: string[] = Array.isArray(u.permissions)
         ? u.permissions
         : [];
@@ -118,9 +101,7 @@ async function findLocalUserByPin(
   branchId: string,
   pin: string,
 ): Promise<LocalUser | null> {
-  if (!branchId || !pin) {
-    return null;
-  }
+  if (!branchId || !pin) return null;
 
   await initDatabase();
   const db = getDb();
@@ -151,7 +132,6 @@ async function findLocalUserByPin(
       pin: row.pin,
       branchId: row.branchId,
       isActive: !!row.isActive,
-      // 🔹 return permissions from cache
       permissions,
     };
   } catch (err) {
@@ -168,10 +148,10 @@ export default function HomeScreen({ navigation, online }: any) {
 
   const [branchId, setBranchId] = useState<string | null>(null);
   const [branchName, setBranchName] = useState<string | null>(null);
-  const [deviceRef, setDeviceRef] = useState<string | null>(null);
+
+  const [brandName, setBrandName] = useState<string | null>(null);
 
   useEffect(() => {
-    // ensure users table exists (fire-and-forget)
     (async () => {
       try {
         await ensureUsersTable();
@@ -181,23 +161,152 @@ export default function HomeScreen({ navigation, online }: any) {
     })();
   }, []);
 
+  // ✅ robust loader: try deviceInfo, then other common keys
+  useEffect(() => {
+    (async () => {
+      try {
+        // 1) deviceInfo (most common)
+        const raw = await AsyncStorage.getItem('deviceInfo');
+        if (raw) {
+          const device = JSON.parse(raw);
+
+          const bn =
+            device.brand?.name ||
+            device.brandName ||
+            device.brand?.title ||
+            device.brandTitle ||
+            device.brand?.code ||
+            device.brandCode ||
+            null;
+
+          const brName =
+            device.branch?.name ||
+            device.branchName ||
+            device.branch?.title ||
+            device.branchTitle ||
+            null;
+
+          const brId = device.branchId || device.branch?.id || null;
+
+          if (bn) setBrandName(String(bn));
+          if (brName) setBranchName(String(brName));
+          if (brId) setBranchId(String(brId));
+        }
+
+        // 2) fallback: some apps store brand/branch separately
+        // brand fallbacks
+        if (!brandName) {
+          const candidates = [
+            'pos_brand',
+            'brandInfo',
+            'brand',
+            'selectedBrand',
+            'currentBrand',
+            'activeBrand',
+            'brand_settings',
+          ];
+
+          for (const k of candidates) {
+            const v = await AsyncStorage.getItem(k);
+            if (!v) continue;
+
+            try {
+              const obj = JSON.parse(v);
+              const bn =
+                obj?.name ||
+                obj?.brand?.name ||
+                obj?.title ||
+                obj?.code ||
+                obj?.brandCode ||
+                null;
+
+              if (bn) {
+                setBrandName(String(bn));
+                break;
+              }
+            } catch {
+              // plain string value
+              if (v && v.length > 0) {
+                setBrandName(String(v));
+                break;
+              }
+            }
+          }
+        }
+
+        // branch fallbacks
+        if (!branchName || !branchId) {
+          const candidates = ['pos_branch', 'branchInfo', 'branch', 'selectedBranch'];
+
+          for (const k of candidates) {
+            const v = await AsyncStorage.getItem(k);
+            if (!v) continue;
+
+            try {
+              const obj = JSON.parse(v);
+              const brName =
+                obj?.name || obj?.branch?.name || obj?.title || obj?.branchName || null;
+              const brId = obj?.id || obj?.branch?.id || obj?.branchId || null;
+
+              if (!branchName && brName) setBranchName(String(brName));
+              if (!branchId && brId) setBranchId(String(brId));
+
+              if ((branchName || brName) && (branchId || brId)) break;
+            } catch {
+              // ignore
+            }
+          }
+        }
+      } catch (e) {
+        console.log('Failed to load brand/branch info', e);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     (async () => {
       try {
         const raw = await AsyncStorage.getItem('deviceInfo');
-        if (raw) {
-          const device = JSON.parse(raw);
-          setBranchId(device.branchId || device.branch?.id || null);
-          setBranchName(device.branch?.name || null);
-          setDeviceRef(device.reference || device.code || device.id || null);
-        } else {
-          console.log('No deviceInfo found in AsyncStorage');
+        if (!raw) return;
+
+        const device = JSON.parse(raw);
+
+        // existing
+        setBranchId(device.branchId || device.branch?.id || null);
+        setBranchName(device.branch?.name || device.branchName || null);
+
+        // try stored brand first
+        const storedBrand =
+          device.brand?.name || device.brandName || null;
+        if (storedBrand) setBrandName(storedBrand);
+
+        // ✅ fallback: fetch from API by deviceId if brand missing
+        const deviceId = device.id;
+        if (deviceId && !storedBrand) {
+          const live: any = await get(`/devices/${deviceId}`);
+          const liveBrandName = live?.branch?.brand?.name || null;
+          const liveBranchName = live?.branch?.name || null;
+
+          if (liveBrandName) setBrandName(liveBrandName);
+          if (liveBranchName) setBranchName(liveBranchName);
+
+          // ✅ also update stored deviceInfo so next time it loads instantly
+          const merged = {
+            ...device,
+            branch: live?.branch ?? device.branch ?? null,
+            brand: live?.branch?.brand ?? device.brand ?? null,
+            brandName: liveBrandName ?? device.brandName ?? null,
+            branchName: liveBranchName ?? device.branchName ?? null,
+          };
+          await AsyncStorage.setItem('deviceInfo', JSON.stringify(merged));
         }
       } catch (e) {
-        console.log('Failed to load deviceInfo', e);
+        console.log('Failed to load deviceInfo / fetch brand', e);
       }
     })();
   }, []);
+
 
   const handleChangePin = useCallback(
     (digit: string) => {
@@ -210,8 +319,7 @@ export default function HomeScreen({ navigation, online }: any) {
 
       if (pin.length >= PIN_LENGTH) return;
 
-      const next = pin + digit;
-      setPin(next);
+      setPin(pin + digit);
     },
     [pin, loading],
   );
@@ -230,24 +338,21 @@ export default function HomeScreen({ navigation, online }: any) {
       try {
         setLoading(true);
 
-        console.log('🔐 PIN login (ONLINE) with branchId:', branchId);
         const res: any = await post('/auth/login-pin', { pin: p, branchId });
 
-        console.log('✅ PIN login success:', res);
         setPin('');
 
-        // 🔹 capture permissions from backend
         const permissions: string[] = Array.isArray(res.permissions)
           ? res.permissions
           : [];
 
-        // 🔹 capture tokens from backend for API calls (access + refresh)
         const accessToken =
           typeof res.accessToken === 'string'
             ? res.accessToken
             : typeof res.token === 'string'
-            ? res.token
-            : null;
+              ? res.token
+              : null;
+
         const refreshToken =
           typeof res.refreshToken === 'string' ? res.refreshToken : null;
 
@@ -267,7 +372,7 @@ export default function HomeScreen({ navigation, online }: any) {
           appRole: res.appRole,
           roleName: res.roleName,
           branchId: branchObj?.id ?? branchId,
-          permissions, // 🔹 store permissions in pos_user
+          permissions,
         };
 
         await AsyncStorage.multiSet([
@@ -275,7 +380,6 @@ export default function HomeScreen({ navigation, online }: any) {
           ['pos_branch', JSON.stringify(branchObj)],
         ]);
 
-        // also cache user locally for offline login later
         try {
           await saveUsersToSQLite(
             [
@@ -285,9 +389,9 @@ export default function HomeScreen({ navigation, online }: any) {
                 email: res.email,
                 appRole: res.appRole,
                 roleName: res.roleName,
-                pin: p, // we used this PIN
+                pin: p,
                 isActive: true,
-                permissions, // 🔹 cache permissions for offline
+                permissions,
               },
             ],
             branchId,
@@ -312,8 +416,6 @@ export default function HomeScreen({ navigation, online }: any) {
       } catch (err: any) {
         console.log('LOGIN PIN ERR', err);
         setPin('');
-
-        // handle offline / session errors nicely if they ever bubble here
         const msg = String(err?.message || '');
         if (msg.includes('OFFLINE_MODE')) {
           Alert.alert(
@@ -346,7 +448,6 @@ export default function HomeScreen({ navigation, online }: any) {
 
       try {
         setLoading(true);
-        console.log('🔐 PIN login (OFFLINE) with branchId:', branchId);
 
         const user = await findLocalUserByPin(branchId, p);
         if (!user) {
@@ -361,7 +462,6 @@ export default function HomeScreen({ navigation, online }: any) {
         const branchRaw = await AsyncStorage.getItem('pos_branch');
         const branchObj = branchRaw ? JSON.parse(branchRaw) : null;
 
-        // 🔹 include permissions from SQLite cache (if any)
         await AsyncStorage.setItem(
           'pos_user',
           JSON.stringify({
@@ -388,6 +488,7 @@ export default function HomeScreen({ navigation, online }: any) {
             },
           ],
         });
+
         setPin('');
       } catch (err) {
         console.log('OFFLINE LOGIN ERR', err);
@@ -405,11 +506,8 @@ export default function HomeScreen({ navigation, online }: any) {
 
   const loginWithPin = useCallback(
     async (p: string) => {
-      if (online) {
-        await loginWithPinOnline(p);
-      } else {
-        await loginWithPinOffline(p);
-      }
+      if (online) await loginWithPinOnline(p);
+      else await loginWithPinOffline(p);
     },
     [online, loginWithPinOnline, loginWithPinOffline],
   );
@@ -430,25 +528,19 @@ export default function HomeScreen({ navigation, online }: any) {
     }
 
     if (!online) {
-      Alert.alert(
-        'Offline',
-        'You are offline. Connect to the internet to sync users.',
-      );
+      Alert.alert('Offline', 'You are offline. Connect to the internet to sync users.');
       return;
     }
 
     try {
       setLoading(true);
-      console.log('🔄 Sync users for branchId:', branchId);
 
-      // Expecting backend to return: either an array of users or { users: [...] }
       const res: any = await post('/auth/sync-users', { branchId });
       const list: any[] = Array.isArray(res) ? res : res?.users ?? [];
 
       if (!Array.isArray(list) || list.length === 0) {
         Alert.alert('Sync finished', 'No users returned from server.');
       } else {
-        // 🔹 list[i].permissions will be saved if backend sends it
         await saveUsersToSQLite(list, branchId);
         Alert.alert('Sync finished', `Synced ${list.length} users.`);
       }
@@ -457,22 +549,15 @@ export default function HomeScreen({ navigation, online }: any) {
       const msg = String(e?.message || '');
 
       if (msg.includes('SESSION_EXPIRED')) {
-        // online session is dead – clear tokens and ask for re-login
         await clearAllTokens();
         Alert.alert(
           'Session expired',
           'Online session has expired. Please login again with PIN while online. You can still use offline PIN with cached users.',
         );
       } else if (msg.includes('OFFLINE_MODE')) {
-        Alert.alert(
-          'Offline',
-          'You appear to be offline. Connect to the internet to sync users.',
-        );
+        Alert.alert('Offline', 'You appear to be offline. Connect to the internet to sync users.');
       } else {
-        Alert.alert(
-          'Sync failed',
-          'Unable to sync users. Please try again.',
-        );
+        Alert.alert('Sync failed', 'Unable to sync users. Please try again.');
       }
     } finally {
       setLoading(false);
@@ -484,10 +569,7 @@ export default function HomeScreen({ navigation, online }: any) {
       {Array.from({ length: PIN_LENGTH }).map((_, i) => (
         <View
           key={i}
-          style={[
-            styles.dot,
-            i < pin.length ? styles.dotFilled : styles.dotEmpty,
-          ]}
+          style={[styles.dot, i < pin.length ? styles.dotFilled : styles.dotEmpty]}
         />
       ))}
     </View>
@@ -504,7 +586,6 @@ export default function HomeScreen({ navigation, online }: any) {
     <View style={styles.root}>
       <View style={styles.card}>
         <Text style={styles.logo}>DWF POS</Text>
-
         <Text style={styles.subtitle}>Login PIN</Text>
 
         {renderDots()}
@@ -516,10 +597,7 @@ export default function HomeScreen({ navigation, online }: any) {
                 <Pressable
                   key={d}
                   onPress={() => handleChangePin(d)}
-                  style={({ pressed }) => [
-                    styles.key,
-                    pressed && styles.keyPressed,
-                  ]}
+                  style={({ pressed }) => [styles.key, pressed && styles.keyPressed]}
                   disabled={loading}
                 >
                   <Text style={styles.keyText}>{d}</Text>
@@ -530,31 +608,23 @@ export default function HomeScreen({ navigation, online }: any) {
         </View>
 
         <Pressable
-          style={({ pressed }) => [
-            styles.syncButton,
-            pressed && styles.syncButtonPressed,
-          ]}
+          style={({ pressed }) => [styles.syncButton, pressed && styles.syncButtonPressed]}
           onPress={onSyncUsers}
           disabled={loading}
         >
-          {loading ? (
-            <ActivityIndicator />
-          ) : (
-            <Text style={styles.syncText}>Sync Users</Text>
-          )}
+          {loading ? <ActivityIndicator /> : <Text style={styles.syncText}>Sync Users</Text>}
         </Pressable>
 
+        {/* ✅ Footer: ONLY Brand + Branch + Status */}
         <View style={styles.footer}>
           <Text style={styles.footerText}>
-            Device: {deviceRef ? deviceRef : '#N/A'}
+            Brand: {brandName ? brandName : '#N/A'}
           </Text>
           <Text style={styles.footerText}>
-            {branchName
-              ? `Branch: ${branchName}`
-              : 'Branch: Not linked (activate device)'}
+            {branchName ? `Branch: ${branchName}` : 'Branch: Not linked (activate device)'}
           </Text>
           <Text style={styles.footerText}>
-            Status: {online ? 'Online' : 'Offline (offline PIN uses cached users)'}
+            Status: {online ? 'Online' : 'Offline'}
           </Text>
         </View>
       </View>

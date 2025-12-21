@@ -1,5 +1,5 @@
 // src/screens/ProductsScreen.tsx
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   View,
   Text,
@@ -207,13 +207,6 @@ async function loadProductsFromSQLite(
     );
   }
 
-  console.log(
-    '📦 SQLite products',
-    categoryId ? `for category ${categoryId}` : '(ALL)',
-    '→',
-    baseProducts.length,
-  );
-
   if (!baseProducts.length) return [];
 
   const productIds = baseProducts.map((p: any) => p.id);
@@ -274,6 +267,13 @@ export default function ProductsScreen({
 
   const readOnlyCart: boolean = !!reopenFromCallcenter;
 
+  const [brandName, setBrandName] = useState<string | null>(null);
+  const [brandCode, setBrandCode] = useState<string | null>(null);
+
+  // ✅ REQUIRED FOR ORDERS (Prisma requires brandId + deviceId)
+  const [brandId, setBrandId] = useState<string | null>(null);
+  const [deviceId, setDeviceId] = useState<string | null>(null);
+
   const [products, setProducts] = useState<Product[]>([]);
   const [filtered, setFiltered] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
@@ -283,15 +283,25 @@ export default function ProductsScreen({
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [orderType, setOrderType] = useState<string | null>(null);
   const [orderTypeModalVisible, setOrderTypeModalVisible] = useState(false);
+
+  // Payment
   const [paymentModalVisible, setPaymentModalVisible] = useState(false);
   const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([]);
-  const [selectedPaymentMethodId, setSelectedPaymentMethodId] =
-    useState<string | null>(null);
   const [vatRate, setVatRate] = useState<number>(15);
   const [payments, setPayments] = useState<PaymentEntry[]>([]);
   const [paying, setPaying] = useState(false);
   const [voidLoading, setVoidLoading] = useState(false);
+
+
+  const [selectedPaymentMethodId, setSelectedPaymentMethodId] = useState<string | null>(null);
+  const [showCustomAmount, setShowCustomAmount] = useState(false);
+  const [customAmountInput, setCustomAmountInput] = useState('');
+
+
+  // Orders badge
   const [ordersBadge, setOrdersBadge] = useState(0);
+
+  // Discounts
   const [discountConfigs, setDiscountConfigs] = useState<DiscountConfig[]>([]);
   const [appliedDiscount, setAppliedDiscount] =
     useState<AppliedDiscount | null>(null);
@@ -305,8 +315,12 @@ export default function ProductsScreen({
     'AMOUNT' | 'PERCENT' | null
   >(null);
   const [discountInputValue, setDiscountInputValue] = useState('');
+
+  // Branch
   const [activeBranchId, setActiveBranchId] = useState<string | null>(null);
-  const [branchId, setBranchId] = useState<string | null>(null); // for orders cache sync
+  const [branchId, setBranchId] = useState<string | null>(null);
+
+  // Customers
   const [customerModalVisible, setCustomerModalVisible] = useState(false);
   const [customerSearch, setCustomerSearch] = useState('');
   const [customerList, setCustomerList] = useState<CustomerSummary[]>([]);
@@ -316,9 +330,62 @@ export default function ProductsScreen({
   const [newCustomerName, setNewCustomerName] = useState('');
   const [newCustomerPhone, setNewCustomerPhone] = useState('');
   const [savingCustomer, setSavingCustomer] = useState(false);
-  const [showCustomAmount, setShowCustomAmount] = useState(false);
-  const [customAmountInput, setCustomAmountInput] = useState('');
+
+  // Permissions
   const [userPermissions, setUserPermissions] = useState<string[]>([]);
+
+  /* ------------------------ LOAD DEVICE INFO (brandId/deviceId/branchId) ------------------------ */
+  useEffect(() => {
+    (async () => {
+      try {
+        const rawDev = await AsyncStorage.getItem('deviceInfo');
+        if (!rawDev) return;
+
+        const d = JSON.parse(rawDev);
+
+        // deviceId could be stored as deviceId OR id depending on activation response
+        const devId = String(d?.deviceId ?? d?.id ?? '').trim();
+        const bId = String(d?.brandId ?? d?.brand?.id ?? '').trim();
+        const brId = String(d?.branchId ?? d?.branch?.id ?? '').trim();
+
+        if (devId) setDeviceId(devId);
+        if (bId) setBrandId(bId);
+        if (brId) setBranchId(brId);
+      } catch (e) {
+        console.log('deviceInfo load error (ProductsScreen)', e);
+      }
+    })();
+  }, []);
+
+  /* ------------------------ BRAND (optional top bar display) ------------------------ */
+  useEffect(() => {
+    (async () => {
+      try {
+        const rawBrand = await AsyncStorage.getItem('pos_brand');
+        if (rawBrand) {
+          const b = JSON.parse(rawBrand);
+          setBrandName(b?.name ?? null);
+          setBrandCode(b?.code ?? null);
+
+          // if pos_brand contains id
+          if (b?.id) setBrandId(String(b.id));
+          return;
+        }
+
+        const rawDev = await AsyncStorage.getItem('deviceInfo');
+        if (rawDev) {
+          const d = JSON.parse(rawDev);
+          setBrandName(d?.brandName ?? d?.brand?.name ?? null);
+          setBrandCode(d?.brandCode ?? d?.brand?.code ?? null);
+
+          if (d?.brandId) setBrandId(String(d.brandId));
+          else if (d?.brand?.id) setBrandId(String(d.brand.id));
+        }
+      } catch (e) {
+        console.log('brand load error', e);
+      }
+    })();
+  }, []);
 
   // 🔁 Restore applied discount when ProductsScreen mounts
   useEffect(() => {
@@ -373,7 +440,6 @@ export default function ProductsScreen({
         const perms: string[] = Array.isArray(u?.permissions)
           ? u.permissions
           : [];
-        console.log('👤 POS user permissions:', perms);
         setUserPermissions(perms);
       } catch (e) {
         console.log('pos_user permissions load error', e);
@@ -420,12 +486,10 @@ export default function ProductsScreen({
         }
 
         if (!online) {
-          console.log('Offline → ProductsScreen using only SQLite');
           return;
         }
 
         try {
-          console.log('ProductsScreen background syncMenu start');
           await syncMenu();
           if (cancelled) return;
 
@@ -433,9 +497,6 @@ export default function ProductsScreen({
 
           if (!fresh || fresh.length === 0) {
             try {
-              console.log(
-                'SQLite empty after sync → API fallback /menu/products',
-              );
               const apiAll = await get('/menu/products');
               const apiArray = Array.isArray(apiAll) ? apiAll : [];
 
@@ -455,10 +516,10 @@ export default function ProductsScreen({
                   sizes:
                     Array.isArray(p.sizes) && p.sizes.length > 0
                       ? p.sizes.map((s: any) => ({
-                          id: s.id,
-                          name: s.name,
-                          price: s.price,
-                        }))
+                        id: s.id,
+                        name: s.name,
+                        price: s.price,
+                      }))
                       : [],
                   categoryId: p.categoryId ?? null,
                 }));
@@ -468,10 +529,6 @@ export default function ProductsScreen({
           }
 
           if (!cancelled) {
-            console.log(
-              '🌐 Products after background refresh:',
-              fresh ? fresh.length : 0,
-            );
             setProducts(fresh || []);
             setFiltered(fresh || []);
           }
@@ -501,19 +558,12 @@ export default function ProductsScreen({
     const intervalMs = 30 * 60 * 1000;
     let cancelled = false;
 
-    console.log('⏰ ProductsScreen auto-sync scheduler started (30 min)');
-
     const id = setInterval(async () => {
       try {
-        console.log('⏰ ProductsScreen auto syncMenu tick');
         await syncMenu();
         if (cancelled) return;
         const fresh = await loadProductsFromSQLite(categoryId);
         if (!cancelled) {
-          console.log(
-            '🌐 Products auto-updated from server:',
-            fresh ? fresh.length : 0,
-          );
           setProducts(fresh || []);
           setFiltered(fresh || []);
         }
@@ -525,7 +575,6 @@ export default function ProductsScreen({
     return () => {
       cancelled = true;
       clearInterval(id);
-      console.log('⏹ ProductsScreen auto-sync scheduler cleared');
     };
   }, [online, categoryId]);
 
@@ -535,7 +584,6 @@ export default function ProductsScreen({
 
     async function loadConfig() {
       try {
-        // branch info for discounts
         const branchRaw = await AsyncStorage.getItem('pos_branch');
         let branchIdFromStorage: string | null = null;
         if (branchRaw) {
@@ -546,16 +594,25 @@ export default function ProductsScreen({
             branchIdFromStorage = null;
           }
         }
-        if (mounted) {
-          setActiveBranchId(branchIdFromStorage);
+
+        // fallback: use deviceInfo branchId if pos_branch not found
+        if (!branchIdFromStorage) {
+          const rawDev = await AsyncStorage.getItem('deviceInfo');
+          if (rawDev) {
+            try {
+              const d = JSON.parse(rawDev);
+              branchIdFromStorage = d?.branchId ?? d?.branch?.id ?? null;
+            } catch { }
+          }
         }
+
+        if (mounted) setActiveBranchId(branchIdFromStorage);
 
         const url = branchIdFromStorage
           ? `/pos/config?branchId=${encodeURIComponent(branchIdFromStorage)}`
           : '/pos/config';
 
         const cfg = await get(url);
-        console.log('📦 POS CONFIG RAW:', cfg);
         if (!mounted) return;
 
         if ((cfg as any)?.error) {
@@ -566,9 +623,7 @@ export default function ProductsScreen({
         const vat = (cfg as any)?.vatRate;
         const methods = (cfg as any)?.paymentMethods;
 
-        if (typeof vat === 'number') {
-          setVatRate(vat);
-        }
+        if (typeof vat === 'number') setVatRate(vat);
 
         if (Array.isArray(methods)) {
           setPaymentMethods(
@@ -614,12 +669,12 @@ export default function ProductsScreen({
             const orderTypesRaw: string[] =
               typeof d.orderTypes === 'string'
                 ? d.orderTypes
-                    .split(',')
-                    .map((s: any) => String(s).trim())
-                    .filter(Boolean)
+                  .split(',')
+                  .map((s: any) => String(s).trim())
+                  .filter(Boolean)
                 : Array.isArray(d.orderTypes)
-                ? d.orderTypes.map((x: any) => String(x))
-                : [];
+                  ? d.orderTypes.map((x: any) => String(x))
+                  : [];
 
             const orderTypes: string[] = orderTypesRaw
               .map((x) => normalizeOrderTypeLabel(x))
@@ -642,10 +697,8 @@ export default function ProductsScreen({
             };
           });
 
-          console.log('🎯 POS DISCOUNT CONFIGS:', mapped);
           setDiscountConfigs(mapped);
         } else {
-          console.log('ℹ️ No discounts array present in POS config.');
           setDiscountConfigs([]);
         }
       } catch (err) {
@@ -675,20 +728,13 @@ export default function ProductsScreen({
         }
       }
 
-      if (!online) {
-        console.log('syncOrdersCache (ProductsScreen): offline, skipping API');
-        return;
-      }
+      if (!online) return;
 
       let qs = '?take=200';
       if (currentBranchId) qs += `&branchId=${currentBranchId}`;
       const data = await get('/orders' + qs);
       const arr = Array.isArray(data) ? data : [];
 
-      console.log(
-        '🌐 ProductsScreen syncOrdersCache: fetched orders:',
-        arr.length,
-      );
       const locals: LocalOrder[] = arr.map(toLocalOrder);
       await saveOrdersLocal(locals);
     } catch (e) {
@@ -704,31 +750,24 @@ export default function ProductsScreen({
     async function loadBadge() {
       try {
         const raw = await AsyncStorage.getItem('newOrdersCount');
-        console.log('📣 ProductsScreen newOrdersCount raw =', raw);
-
         if (!mounted) return;
 
         let n = 0;
         if (raw) {
           try {
             const parsed = JSON.parse(raw);
-            if (typeof parsed === 'number') {
-              n = parsed;
-            } else if (
+            if (typeof parsed === 'number') n = parsed;
+            else if (
               parsed &&
               typeof parsed === 'object' &&
               typeof parsed.count === 'number'
-            ) {
+            )
               n = parsed.count;
-            } else {
-              n = Number(raw) || 0;
-            }
+            else n = Number(raw) || 0;
           } catch {
             n = Number(raw) || 0;
           }
         }
-
-        console.log('📣 ProductsScreen ordersBadge parsed =', n);
         setOrdersBadge(n);
       } catch (e) {
         console.log('LOAD BADGE ERR (ProductsScreen)', e);
@@ -768,28 +807,13 @@ export default function ProductsScreen({
 
     if (allowedOrderTypes.length > 0) {
       const current = normalizeOrderTypeLabel(orderType);
-      console.log('💳 DISCOUNT ORDER TYPE CHECK', {
-        discountName: discount.name,
-        allowedOrderTypes,
-        currentOrderTypeLabel: orderType,
-        currentNormalized: current,
-      });
-
-      if (!current || !allowedOrderTypes.includes(current)) {
-        return false;
-      }
+      if (!current || !allowedOrderTypes.includes(current)) return false;
     }
 
     if (activeBranchId) {
       const branchIds = discount.branchIds || [];
       if (!discount.applyAllBranches && branchIds.length > 0) {
         const match = branchIds.includes(activeBranchId);
-        console.log('🏪 DISCOUNT BRANCH CHECK', {
-          discountName: discount.name,
-          discountBranchIds: branchIds,
-          activeBranchId,
-          match,
-        });
         if (!match) return false;
       }
     }
@@ -799,14 +823,7 @@ export default function ProductsScreen({
       categoryIds.length > 0 ||
       productSizeIds.length > 0;
 
-    if (!hasAssignments) {
-      console.log(
-        'ℹ️ Discount has no product/category/size assignments, skipping for cart',
-        { discountName: discount.name },
-      );
-      return false;
-    }
-
+    if (!hasAssignments) return false;
     if (!cartItems.length) return false;
 
     const cartProductIds = new Set(cartItems.map((c) => c.productId));
@@ -815,16 +832,12 @@ export default function ProductsScreen({
     );
 
     const productById = new Map<string, Product>();
-    products.forEach((p) => {
-      productById.set(p.id, p);
-    });
+    products.forEach((p) => productById.set(p.id, p));
 
     const cartCategoryIds = new Set<string>();
     cartItems.forEach((c) => {
       const p = productById.get(c.productId);
-      if (p && p.categoryId) {
-        cartCategoryIds.add(p.categoryId);
-      }
+      if (p?.categoryId) cartCategoryIds.add(p.categoryId);
     });
 
     const productMatch =
@@ -837,35 +850,18 @@ export default function ProductsScreen({
       productSizeIds.length > 0 &&
       productSizeIds.some((sid) => cartSizeIds.has(sid));
 
-    const eligible = productMatch || categoryMatch || sizeMatch;
-
-    console.log('🎯 DISCOUNT ASSIGNMENT CHECK', {
-      discountName: discount.name,
-      productIds,
-      categoryIds,
-      productSizeIds,
-      cartProductIds: Array.from(cartProductIds),
-      cartCategoryIds: Array.from(cartCategoryIds),
-      cartSizeIds: Array.from(cartSizeIds),
-      productMatch,
-      categoryMatch,
-      sizeMatch,
-      eligible,
-    });
-
-    return eligible;
+    return productMatch || categoryMatch || sizeMatch;
   }
 
-  const applicableDiscounts: DiscountConfig[] = discountConfigs.filter((d) =>
-    isDiscountEligibleForCart(
-      d,
-      Array.isArray(cart) ? (cart as CartItem[]) : [],
-    ),
-  );
-
-  useEffect(() => {
-    console.log('🔎 Applicable discounts for cart:', applicableDiscounts);
-  }, [applicableDiscounts.length]);
+  const applicableDiscounts: DiscountConfig[] = useMemo(() => {
+    return discountConfigs.filter((d) =>
+      isDiscountEligibleForCart(
+        d,
+        Array.isArray(cart) ? (cart as CartItem[]) : [],
+      ),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [discountConfigs, cart, orderType, activeBranchId, products]);
 
   /* ------------------------ CART HELPERS ------------------------ */
   function ensureOrderType() {
@@ -906,11 +902,7 @@ export default function ProductsScreen({
     ensureOrderType();
   }
 
-  function changeCartQty(
-    productId: string,
-    sizeId: string | null,
-    delta: number,
-  ) {
+  function changeCartQty(productId: string, sizeId: string | null, delta: number) {
     if (readOnlyCart) return;
     setCart((prev: CartItem[]) => {
       const items = [...prev];
@@ -920,11 +912,8 @@ export default function ProductsScreen({
       if (idx === -1) return items;
 
       const newQty = items[idx].qty + delta;
-      if (newQty <= 0) {
-        items.splice(idx, 1);
-      } else {
-        items[idx] = { ...items[idx], qty: newQty };
-      }
+      if (newQty <= 0) items.splice(idx, 1);
+      else items[idx] = { ...items[idx], qty: newQty };
       return items;
     });
   }
@@ -942,11 +931,8 @@ export default function ProductsScreen({
       const items = [...prev];
       const item = items[index];
       const newQty = item.qty + delta;
-      if (newQty <= 0) {
-        items.splice(index, 1);
-      } else {
-        items[index] = { ...item, qty: newQty };
-      }
+      if (newQty <= 0) items.splice(index, 1);
+      else items[index] = { ...item, qty: newQty };
       return items;
     });
   }
@@ -1167,7 +1153,7 @@ export default function ProductsScreen({
   /* ------------------------ TOTALS ------------------------ */
   const grossTotal: number = (cart as CartItem[]).reduce(
     (sum, it) => sum + calcLineTotal(it),
-    0,
+    0
   );
 
   let discountAmount = 0;
@@ -1181,41 +1167,45 @@ export default function ProductsScreen({
   }
 
   const netTotal = grossTotal - discountAmount;
+
   const vatFraction = vatRate > 0 ? vatRate / 100 : 0;
   const subtotalEx =
     netTotal > 0 && vatFraction > 0 ? netTotal / (1 + vatFraction) : netTotal;
   const vatAmount = netTotal - subtotalEx;
+
   const totalPaid = payments.reduce((s, p) => s + p.amount, 0);
   const remainingRaw = netTotal - totalPaid;
   const remaining = remainingRaw > 0 ? remainingRaw : 0;
   const changeAmount = totalPaid > netTotal ? totalPaid - netTotal : 0;
 
+  /* ------------------------ PAYMENT DERIVED ------------------------ */
+  const selectedMethod = paymentMethods.find(
+    (m) => m.id === selectedPaymentMethodId
+  );
+
+  const quickAmounts = [remaining, 50, 100].filter((x) => x > 0.01);
+
   const groupedPayments = payments.reduce(
     (acc, p) => {
-      if (!acc[p.methodId]) {
-        acc[p.methodId] = { methodName: p.methodName, amount: 0 };
-      }
+      if (!acc[p.methodId]) acc[p.methodId] = { methodName: p.methodName, amount: 0 };
       acc[p.methodId].amount += p.amount;
       return acc;
     },
-    {} as Record<string, { methodName: string; amount: number }>,
+    {} as Record<string, { methodName: string; amount: number }>
   );
   const groupedPaymentsArray = Object.values(groupedPayments);
 
   /* ------------------------ PAYMENT FLOW ------------------------ */
   function openPaymentModal() {
+    if (readOnlyCart) return;
     if (netTotal <= 0) return;
 
+    // CategoryScreen style reset
     setSelectedPaymentMethodId(null);
     setShowCustomAmount(false);
     setCustomAmountInput('');
     setPaymentModalVisible(true);
   }
-
-  const selectedMethod = paymentMethods.find(
-    (m) => m.id === selectedPaymentMethodId,
-  );
-  const selectedPaymentName = selectedMethod?.name || '';
 
   function addPayment(amount: number) {
     if (!selectedMethod) return;
@@ -1250,42 +1240,55 @@ export default function ProductsScreen({
     }
   }
 
-  const quickAmounts = [remaining, 50, 100].filter((x) => x > 0.01);
-
   function clearPayments() {
     if (!payments.length) return;
     Alert.alert('Clear payments', 'Remove all added payments?', [
       { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Clear',
-        style: 'destructive',
-        onPress: () => setPayments([]),
-      },
+      { text: 'Clear', style: 'destructive', onPress: () => setPayments([]) },
     ]);
   }
 
+
+  /* ------------------------ REQUIRED IDS GUARD ------------------------ */
+  function ensureBrandAndDevice(): boolean {
+    if (!brandId || !deviceId) {
+      Alert.alert(
+        'Device not activated',
+        'Missing brandId/deviceId. Please re-activate this POS device.',
+      );
+      return false;
+    }
+    return true;
+  }
+
   async function handlePay() {
+    if (readOnlyCart) return;
     if (paying) return;
     if (netTotal <= 0) return;
     if (remaining > 0.01) return;
     if (!payments.length) return;
-  
+    if (!ensureBrandAndDevice()) return;
+
     try {
       setPaying(true);
-  
+
       const discountPayload = appliedDiscount
         ? {
-            kind: appliedDiscount.kind,
-            value: appliedDiscount.value,
-            amount: discountAmount,
-            source: appliedDiscount.source,
-            name: appliedDiscount.name ?? null,
-            configId: appliedDiscount.id ?? null,
-            scope: appliedDiscount.scope ?? null,
-          }
+          kind: appliedDiscount.kind,
+          value: appliedDiscount.value,
+          amount: discountAmount,
+          source: appliedDiscount.source,
+          name: appliedDiscount.name ?? null,
+          configId: appliedDiscount.id ?? null,
+          scope: appliedDiscount.scope ?? null,
+        }
         : null;
-  
+
       const basePayload: any = {
+        // ✅ REQUIRED FOR API
+        brandId,
+        deviceId,
+
         vatRate,
         subtotalEx,
         vatAmount,
@@ -1303,32 +1306,21 @@ export default function ProductsScreen({
           modifiers:
             i.modifiers && i.modifiers.length > 0
               ? i.modifiers.map((m) => ({
-                  modifierItemId: m.itemId,
-                  price: m.price,
-                  qty: 1,
-                }))
+                modifierItemId: m.itemId,
+                price: m.price,
+                qty: 1,
+              }))
               : [],
         })),
         payments,
       };
-  
-      // ⭐ NEW: send customerId when a customer is selected
+
       if (selectedCustomer?.id) {
         basePayload.customerId = String(selectedCustomer.id);
       }
-  
+
       if (activeOrderId) {
-        console.log(
-          '📨 CLOSE existing order (ProductsScreen)',
-          activeOrderId,
-          '\nselectedCustomer =',
-          selectedCustomer,
-          '\nbasePayload =',
-          JSON.stringify(basePayload, null, 2),
-        );
-  
-        const resp = await post(`/orders/${activeOrderId}/close`, basePayload);
-        console.log('✅ ORDER CLOSED (ProductsScreen)', resp);
+        await post(`/orders/${activeOrderId}/close`, basePayload);
       } else {
         const payload = {
           branchName,
@@ -1336,27 +1328,16 @@ export default function ProductsScreen({
           status: 'CLOSED',
           ...basePayload,
         };
-  
-        console.log(
-          '📨 POST /pos/orders payload (ProductsScreen)',
-          '\nselectedCustomer =',
-          selectedCustomer,
-          '\npayload =',
-          JSON.stringify(payload, null, 2),
-        );
-  
-        const resp = await post('/pos/orders', payload);
-        console.log('✅ ORDER CREATED (ProductsScreen)', resp);
+        await post('/pos/orders', payload);
       }
-  
+
       setCart([]);
       setPayments([]);
       setOrderType(null);
       setActiveOrderId(null);
       setSelectedCustomer(null);
       setAppliedDiscount(null);
-  
-      // 🔄 refresh local orders cache for OrdersScreen
+
       await syncOrdersCache();
     } catch (err) {
       console.log('PAY /orders/:id/close ERROR (ProductsScreen)', err);
@@ -1364,15 +1345,12 @@ export default function ProductsScreen({
       setPaying(false);
     }
   }
-  
+
   async function handleNewOrder() {
+    if (readOnlyCart) return;
     const cartItems = cart as CartItem[];
 
     if (activeOrderId) {
-      console.log(
-        'NEW pressed while editing existing order – clearing cart, not creating new order',
-      );
-
       setCart([]);
       setPayments([]);
       setOrderType(null);
@@ -1391,20 +1369,26 @@ export default function ProductsScreen({
       return;
     }
 
+    if (!ensureBrandAndDevice()) return;
+
     try {
       const discountPayload = appliedDiscount
         ? {
-            kind: appliedDiscount.kind,
-            value: appliedDiscount.value,
-            amount: discountAmount,
-            source: appliedDiscount.source,
-            name: appliedDiscount.name ?? null,
-            configId: appliedDiscount.id ?? null,
-            scope: appliedDiscount.scope ?? null,
-          }
+          kind: appliedDiscount.kind,
+          value: appliedDiscount.value,
+          amount: discountAmount,
+          source: appliedDiscount.source,
+          name: appliedDiscount.name ?? null,
+          configId: appliedDiscount.id ?? null,
+          scope: appliedDiscount.scope ?? null,
+        }
         : null;
 
-      const payload = {
+      const payload: any = {
+        // ✅ REQUIRED FOR API
+        brandId,
+        deviceId,
+
         branchName,
         userName,
         orderType,
@@ -1425,21 +1409,20 @@ export default function ProductsScreen({
           modifiers:
             i.modifiers && i.modifiers.length > 0
               ? i.modifiers.map((m) => ({
-                  modifierItemId: m.itemId,
-                  price: m.price,
-                  qty: 1,
-                }))
+                modifierItemId: m.itemId,
+                price: m.price,
+                qty: 1,
+              }))
               : [],
         })),
         payments: [],
       };
 
-      console.log(
-        '📨 POST /pos/orders (ACTIVE) payload',
-        JSON.stringify(payload, null, 2),
-      );
-      const resp = await post('/pos/orders', payload);
-      console.log('✅ ACTIVE ORDER CREATED', resp);
+      if (selectedCustomer?.id) {
+        payload.customerId = String(selectedCustomer.id);
+      }
+
+      await post('/pos/orders', payload);
 
       setCart([]);
       setPayments([]);
@@ -1448,7 +1431,6 @@ export default function ProductsScreen({
       setSelectedCustomer(null);
       setAppliedDiscount(null);
 
-      // 🔄 refresh orders cache
       await syncOrdersCache();
     } catch (err) {
       console.log('NEW ORDER ERROR', err);
@@ -1456,10 +1438,11 @@ export default function ProductsScreen({
   }
 
   function handleVoidPress() {
+    if (readOnlyCart) return;
     const cartItems: CartItem[] = Array.isArray(cart) ? cart : [];
-    if (!cartItems.length) {
-      return;
-    }
+    if (!cartItems.length) return;
+
+    if (!ensureBrandAndDevice()) return;
 
     Alert.alert('Void order', 'Are you sure you want to void this order?', [
       { text: 'Cancel', style: 'cancel' },
@@ -1472,17 +1455,20 @@ export default function ProductsScreen({
 
             const discountPayload = appliedDiscount
               ? {
-                  kind: appliedDiscount.kind,
-                  value: appliedDiscount.value,
-                  amount: discountAmount,
-                  source: appliedDiscount.source,
-                  name: appliedDiscount.name ?? null,
-                  configId: appliedDiscount.id ?? null,
-                  scope: appliedDiscount.scope ?? null,
-                }
+                kind: appliedDiscount.kind,
+                value: appliedDiscount.value,
+                amount: discountAmount,
+                source: appliedDiscount.source,
+                name: appliedDiscount.name ?? null,
+                configId: appliedDiscount.id ?? null,
+                scope: appliedDiscount.scope ?? null,
+              }
               : null;
 
-            const payload = {
+            const payload: any = {
+              brandId,
+              deviceId,
+
               branchName,
               userName,
               status: 'VOID',
@@ -1503,19 +1489,19 @@ export default function ProductsScreen({
                 modifiers:
                   i.modifiers && i.modifiers.length > 0
                     ? i.modifiers.map((m) => ({
-                        modifierItemId: m.itemId,
-                        price: m.price,
-                        qty: 1,
-                      }))
+                      modifierItemId: m.itemId,
+                      price: m.price,
+                      qty: 1,
+                    }))
                     : [],
               })),
               payments: [],
             };
 
-            console.log(
-              '📨 POST /pos/orders (VOID from ProductsScreen)',
-              JSON.stringify(payload, null, 2),
-            );
+            if (selectedCustomer?.id) {
+              payload.customerId = String(selectedCustomer.id);
+            }
+
             await post('/pos/orders', payload);
 
             setCart([]);
@@ -1525,7 +1511,6 @@ export default function ProductsScreen({
             setSelectedCustomer(null);
             setAppliedDiscount(null);
 
-            // 🔄 refresh orders cache
             await syncOrdersCache();
           } catch (err: any) {
             console.log('VOID ORDER ERROR (ProductsScreen)', err);
@@ -1551,12 +1536,24 @@ export default function ProductsScreen({
   const actions: ActionButton[] = [
     { label: 'Print', onPress: () => console.log('PRINT'), visible: true },
     { label: 'Kitchen', onPress: () => console.log('KITCHEN'), visible: true },
-    { label: 'Void', onPress: handleVoidPress, loading: voidLoading, visible: true },
-    // only visible if role has any discount permission
+    {
+      label: 'Void',
+      onPress: handleVoidPress,
+      loading: voidLoading,
+      visible: true,
+    },
     { label: 'Discount', onPress: openDiscountMenu, visible: canUseAnyDiscount },
     { label: 'Notes', onPress: () => console.log('NOTES'), visible: true },
     { label: 'Tags', onPress: () => console.log('TAGS'), visible: true },
     { label: 'More', onPress: () => console.log('MORE'), visible: true },
+  ];
+
+  const orderTypesList = [
+    { label: 'DINE IN', value: 'DINE_IN' },
+    { label: 'TAKE AWAY', value: 'TAKE_AWAY' },
+    { label: 'DELIVERY', value: 'DELIVERY' },
+    { label: 'DRIVE THRU', value: 'DRIVE_THRU' },
+    { label: 'B2B', value: 'B2B' },
   ];
 
   /* ------------------------ RENDER ------------------------ */
@@ -1565,6 +1562,9 @@ export default function ProductsScreen({
       {/* Top bar */}
       <View style={styles.topBar}>
         <View>
+          <Text style={styles.topSub}>
+            Brand: {brandName || brandCode || '-'}
+          </Text>
           <Text style={styles.topSub}>Branch: {branchName || '-'}</Text>
           <Text style={styles.topSub}>User: {userName || '-'}</Text>
         </View>
@@ -1576,10 +1576,7 @@ export default function ProductsScreen({
         <View style={styles.orderPanel}>
           <View style={styles.orderHeaderRow}>
             <Pressable
-              style={[
-                styles.customerButton,
-                readOnlyCart && { opacity: 0.5 },
-              ]}
+              style={[styles.customerButton, readOnlyCart && { opacity: 0.5 }]}
               onPress={openCustomerModal}
               disabled={readOnlyCart}
             >
@@ -1590,7 +1587,7 @@ export default function ProductsScreen({
 
             <Pressable
               onPress={() => setOrderTypeModalVisible(true)}
-              style={styles.orderTypeTag}
+              style={[styles.orderTypeTag, readOnlyCart && { opacity: 0.5 }]}
               disabled={readOnlyCart}
             >
               <Text style={styles.orderTypeText}>
@@ -1622,9 +1619,7 @@ export default function ProductsScreen({
                     }
                   >
                     <View style={styles.orderLineTop}>
-                      <Text style={styles.orderItemName}>
-                        {item.productName}
-                      </Text>
+                      <Text style={styles.orderItemName}>{item.productName}</Text>
                       <Text style={styles.orderItemSize}>
                         {item.sizeName || ''}
                       </Text>
@@ -1634,10 +1629,7 @@ export default function ProductsScreen({
                     </View>
 
                     {item.modifiers && item.modifiers.length > 0 && (
-                      <Text
-                        style={styles.orderItemModifiers}
-                        numberOfLines={2}
-                      >
+                      <Text style={styles.orderItemModifiers} numberOfLines={2}>
                         {item.modifiers.map((m) => m.itemName).join(', ')}
                       </Text>
                     )}
@@ -1692,20 +1684,18 @@ export default function ProductsScreen({
                 <Text style={styles.summaryLabel}>
                   Discount
                   {appliedDiscount?.source === 'PREDEFINED' &&
-                  appliedDiscount.name
+                    appliedDiscount.name
                     ? ` (${appliedDiscount.name})`
                     : appliedDiscount?.kind === 'PERCENT'
-                    ? ` (${appliedDiscount.value.toFixed(2)}%)`
-                    : ''}
+                      ? ` (${appliedDiscount.value.toFixed(2)}%)`
+                      : ''}
                 </Text>
-                <Text style={styles.summaryValue}>
-                  -{toMoney(discountAmount)}
-                </Text>
+                <Text style={styles.summaryValue}>-{toMoney(discountAmount)}</Text>
               </View>
 
               {appliedDiscount && (
                 <Pressable
-                  onPress={clearDiscount}
+                  onPress={() => setAppliedDiscount(null)}
                   style={{ alignSelf: 'flex-end', marginBottom: 2 }}
                 >
                   <Text style={styles.discountClearText}>Remove discount</Text>
@@ -1715,10 +1705,7 @@ export default function ProductsScreen({
               {groupedPaymentsArray.length > 0 && (
                 <View style={styles.paymentsSummaryBox}>
                   {groupedPaymentsArray.map((p) => (
-                    <View
-                      key={p.methodName}
-                      style={styles.paymentSummaryRow}
-                    >
+                    <View key={p.methodName} style={styles.paymentSummaryRow}>
                       <Text style={styles.paymentSummaryLabel}>
                         {p.methodName}
                       </Text>
@@ -1746,13 +1733,12 @@ export default function ProductsScreen({
 
         {/* RIGHT – PRODUCTS PANEL */}
         <View style={styles.productsPanel}>
-          {/* Action buttons */}
           <View style={styles.actionRow}>
             {actions
               .filter((a) => a.visible !== false)
               .map((action) => {
                 const isVoid = action.label === 'Void';
-                const disabled = isVoid && action.loading;
+                const disabled = readOnlyCart || (isVoid && action.loading);
                 return (
                   <Pressable
                     key={action.label}
@@ -1820,22 +1806,21 @@ export default function ProductsScreen({
                 </Text>
               </Pressable>
 
-              {/* Product tiles */}
               {filtered.map((p) => {
                 const hasSizes = p.sizes && p.sizes.length > 0;
                 const qtyNoSize = getCartQty(p.id, null);
+
                 return (
                   <View key={p.id} style={styles.productTile}>
                     <Pressable
                       style={styles.productPressArea}
                       onPress={() => {
-                        if (!readOnlyCart) {
-                          if (hasSizes) {
-                            setSelectedProduct(p);
-                            setSizeModalVisible(true);
-                          } else {
-                            addToCart(p, null);
-                          }
+                        if (readOnlyCart) return;
+                        if (hasSizes) {
+                          setSelectedProduct(p);
+                          setSizeModalVisible(true);
+                        } else {
+                          addToCart(p, null);
                         }
                       }}
                       disabled={readOnlyCart}
@@ -1848,9 +1833,7 @@ export default function ProductsScreen({
                           />
                         ) : (
                           <View style={styles.productImagePlaceholder}>
-                            <Text style={styles.productPlaceholderText}>
-                              IMG
-                            </Text>
+                            <Text style={styles.productPlaceholderText}>IMG</Text>
                           </View>
                         )}
                       </View>
@@ -1907,13 +1890,14 @@ export default function ProductsScreen({
         )}
 
         <Pressable
-          style={[styles.payButton, payDisabled && styles.payButtonDisabled]}
+          style={[
+            styles.payButton,
+            (readOnlyCart || payDisabled) && styles.payButtonDisabled,
+          ]}
           onPress={handlePay}
-          disabled={payDisabled}
+          disabled={readOnlyCart || payDisabled}
         >
-          <Text style={styles.payButtonText}>
-            {paying ? 'PAYING...' : 'PAY'}
-          </Text>
+          <Text style={styles.payButtonText}>{paying ? 'PAYING...' : 'PAY'}</Text>
         </Pressable>
       </View>
 
@@ -1928,11 +1912,11 @@ export default function ProductsScreen({
         </Pressable>
 
         <Pressable
-          style={[styles.bottomItem]}
+          style={styles.bottomItem}
           onPress={() => navigation.navigate('Orders')}
         >
-          <Text style={[styles.bottomIcon]}>🧾</Text>
-          <Text style={[styles.bottomLabel]}>ORDERS</Text>
+          <Text style={styles.bottomIcon}>🧾</Text>
+          <Text style={styles.bottomLabel}>ORDERS</Text>
 
           <View style={styles.bottomBadge}>
             <Text style={styles.bottomBadgeText}>
@@ -1941,10 +1925,7 @@ export default function ProductsScreen({
           </View>
         </Pressable>
 
-        <Pressable
-          style={styles.bottomItem}
-          onPress={() => console.log('TABLES btn')}
-        >
+        <Pressable style={styles.bottomItem} onPress={() => console.log('TABLES')}>
           <Text style={styles.bottomIcon}>📋</Text>
           <Text style={styles.bottomLabel}>TABLES</Text>
         </Pressable>
@@ -1959,7 +1940,7 @@ export default function ProductsScreen({
         </Pressable>
       </View>
 
-      {/* Size popup */}
+      {/* ------------------------ SIZE MODAL ------------------------ */}
       <Modal
         visible={sizeModalVisible}
         transparent
@@ -1984,15 +1965,11 @@ export default function ProductsScreen({
                       disabled={readOnlyCart}
                     >
                       <Text style={styles.sizeName}>{s.name}</Text>
-                      <Text style={styles.sizePriceValue}>
-                        {toMoney(s.price)}
-                      </Text>
+                      <Text style={styles.sizePriceValue}>{toMoney(s.price)}</Text>
                     </Pressable>
                     <Pressable
                       style={styles.sizeRight}
-                      onPress={() =>
-                        addToCart(selectedProduct as Product, s)
-                      }
+                      onPress={() => addToCart(selectedProduct as Product, s)}
                       disabled={readOnlyCart}
                     >
                       <Text style={styles.sizeQtyLabel}>QTY</Text>
@@ -2016,38 +1993,60 @@ export default function ProductsScreen({
         </View>
       </Modal>
 
-      {/* Order type popup */}
+      {/* ------------------------ ORDER TYPE MODAL ------------------------ */}
       <Modal
         visible={orderTypeModalVisible}
         transparent
         animationType="fade"
         onRequestClose={() => setOrderTypeModalVisible(false)}
       >
-        <Pressable
-          style={styles.modalOverlay}
-          onPress={() => setOrderTypeModalVisible(false)}
-        >
-          <View style={styles.orderTypeCard}>
-            <Text style={styles.orderTypeTitle}>Order type</Text>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Order Type</Text>
+            <Text style={styles.modalSub}>Select order type</Text>
 
-            {['Dine In', 'Pick Up', 'Delivery', 'Drive Thru'].map((t) => (
-              <Pressable
-                key={t}
-                style={({ pressed }) => [
-                  styles.orderTypeRow,
-                  pressed && { backgroundColor: '#f3f4f6' },
-                ]}
-                onPress={() => selectOrderType(t)}
-                disabled={readOnlyCart}
-              >
-                <Text style={styles.orderTypeRowText}>{t}</Text>
-              </Pressable>
-            ))}
+            <View style={{ gap: 10 }}>
+              {orderTypesList.map((t) => {
+                const active = orderType === t.value;
+                return (
+                  <Pressable
+                    key={t.value}
+                    onPress={() => selectOrderType(t.value)}
+                    disabled={readOnlyCart}
+                    style={{
+                      paddingVertical: 12,
+                      paddingHorizontal: 12,
+                      borderRadius: 12,
+                      borderWidth: 1,
+                      borderColor: active ? '#111827' : '#e5e7eb',
+                      backgroundColor: active ? '#111827' : '#ffffff',
+                    }}
+                  >
+                    <Text
+                      style={{
+                        fontSize: 14,
+                        fontWeight: '700',
+                        color: active ? '#ffffff' : '#111827',
+                      }}
+                    >
+                      {t.label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+
+            <Pressable
+              style={[styles.modalClose, { backgroundColor: '#374151' }]}
+              onPress={() => setOrderTypeModalVisible(false)}
+            >
+              <Text style={styles.modalCloseText}>Close</Text>
+            </Pressable>
           </View>
-        </Pressable>
+        </View>
       </Modal>
 
-      {/* PAYMENT MODAL */}
+      {/* ------------------------ PAYMENT MODAL (CategoryScreen style) ------------------------ */}
       <Modal
         visible={paymentModalVisible}
         transparent
@@ -2056,6 +2055,7 @@ export default function ProductsScreen({
       >
         <View style={styles.modalOverlay}>
           {!selectedPaymentMethodId ? (
+            // STEP 1: Payment Methods
             <View style={styles.paymentCard}>
               <Text style={styles.modalTitle}>PAYMENT METHODS</Text>
 
@@ -2065,11 +2065,18 @@ export default function ProductsScreen({
                     key={m.id}
                     style={({ pressed }) => [
                       styles.paymentMethodRow,
-                      pressed && { opacity: 0.8 },
+                      pressed && { opacity: 0.85 },
                     ]}
-                    onPress={() => setSelectedPaymentMethodId(m.id)}
+                    onPress={() => {
+                      setSelectedPaymentMethodId(m.id);
+                      setShowCustomAmount(false);
+                      setCustomAmountInput('');
+                    }}
+                    disabled={readOnlyCart}
                   >
-                    <Text style={styles.paymentMethodText}>{m.name}</Text>
+                    <Text style={styles.paymentMethodText}>
+                      {m.name}
+                    </Text>
                   </Pressable>
                 ))}
               </ScrollView>
@@ -2082,78 +2089,77 @@ export default function ProductsScreen({
               </Pressable>
             </View>
           ) : (
+            // STEP 2: Amounts (CategoryScreen list style)
             <View style={styles.amountCard}>
-              <View style={styles.amountHeader}>
-                <Text style={styles.modalTitle}>{selectedPaymentName}</Text>
-                <Text style={styles.amountRemainingText}>
+              <View style={styles.amountHeaderRow}>
+                <Text style={styles.amountTitle}>{selectedMethod?.name || 'Payment'}</Text>
+                <Text style={styles.amountRemaining}>
                   Remaining: {toMoney(remaining)}
                 </Text>
               </View>
 
-              <View>
-                {quickAmounts.map((amt, idx) => (
+              {quickAmounts.map((amt, idx) => (
+                <Pressable
+                  key={`${amt}-${idx}`}
+                  style={({ pressed }) => [
+                    styles.amountListRow,
+                    pressed && styles.amountListRowPressed,
+                  ]}
+                  onPress={() => completePayment(amt)}
+                  disabled={readOnlyCart}
+                >
+                  <Text style={styles.amountListText}>{toMoney(amt)}</Text>
+                </Pressable>
+              ))}
+
+              <Pressable
+                style={({ pressed }) => [
+                  styles.amountListRow,
+                  pressed && styles.amountListRowPressed,
+                ]}
+                onPress={() => setShowCustomAmount(true)}
+                disabled={readOnlyCart}
+              >
+                <Text style={[styles.amountListText, { fontWeight: '700' }]}>CUSTOM</Text>
+              </Pressable>
+
+              {showCustomAmount && (
+                <View style={styles.customInlineBox}>
+                  <TextInput
+                    style={styles.customInlineInput}
+                    value={customAmountInput}
+                    onChangeText={setCustomAmountInput}
+                    keyboardType="numeric"
+                    placeholder="0.00"
+                    placeholderTextColor="#9ca3af"
+                    editable={!readOnlyCart}
+                  />
                   <Pressable
-                    key={idx.toString()}
-                    style={({ pressed }) => [
-                      styles.amountRow,
-                      pressed && { opacity: 0.8 },
-                    ]}
-                    onPress={() => completePayment(amt)}
+                    style={styles.customInlineOk}
+                    onPress={() => {
+                      const val = parseFloat(customAmountInput || '0');
+                      if (!val || val <= 0) return;
+                      completePayment(val);
+                    }}
+                    disabled={readOnlyCart}
                   >
-                    <Text style={styles.amountText}>{toMoney(amt)}</Text>
+                    <Text style={styles.customInlineOkText}>OK</Text>
                   </Pressable>
-                ))}
+                </View>
+              )}
 
-                <Pressable
-                  style={styles.amountRow}
-                  onPress={() => setShowCustomAmount(true)}
-                >
-                  <Text style={styles.amountText}>CUSTOM</Text>
-                </Pressable>
-
-                {showCustomAmount && (
-                  <View style={styles.customAmountBox}>
-                    <Text style={styles.customLabel}>Enter amount</Text>
-                    <TextInput
-                      style={styles.customInput}
-                      value={customAmountInput}
-                      onChangeText={setCustomAmountInput}
-                      keyboardType="numeric"
-                      placeholder="0.00"
-                      placeholderTextColor="#9ca3af"
-                    />
-                    <Pressable
-                      style={styles.customApplyButton}
-                      onPress={() => {
-                        const val = parseFloat(customAmountInput || '0');
-                        if (!val || val <= 0) {
-                          Alert.alert(
-                            'Invalid amount',
-                            'Please enter a valid amount.',
-                          );
-                          return;
-                        }
-                        completePayment(val);
-                      }}
-                    >
-                      <Text style={styles.customApplyText}>APPLY</Text>
-                    </Pressable>
-                  </View>
-                )}
-
-                <Pressable
-                  style={styles.amountCancelRow}
-                  onPress={() => {
-                    setSelectedPaymentMethodId(null);
-                    setShowCustomAmount(false);
-                    setCustomAmountInput('');
-                    setPaymentModalVisible(false);
-                  }}
-                >
-                  <Text style={styles.amountCancelText}>CANCEL</Text>
-                </Pressable>
-              </View>
+              <Pressable
+                style={styles.cancelRow}
+                onPress={() => {
+                  setSelectedPaymentMethodId(null);
+                  setShowCustomAmount(false);
+                  setCustomAmountInput('');
+                }}
+              >
+                <Text style={styles.cancelText}>CANCEL</Text>
+              </Pressable>
             </View>
+
           )}
         </View>
       </Modal>
@@ -2169,7 +2175,6 @@ export default function ProductsScreen({
           <View style={styles.customerCard}>
             <Text style={styles.modalTitle}>Select customer</Text>
 
-            {/* search existing */}
             <View style={styles.customerSearchRow}>
               <TextInput
                 style={styles.customerSearchInput}
@@ -2201,20 +2206,15 @@ export default function ProductsScreen({
                     onPress={() => handleSelectCustomer(c)}
                   >
                     <Text style={styles.customerName}>{c.name}</Text>
-                    {!!c.phone && (
-                      <Text style={styles.customerPhone}>{c.phone}</Text>
-                    )}
+                    {!!c.phone && <Text style={styles.customerPhone}>{c.phone}</Text>}
                   </Pressable>
                 ))}
 
               {!customerLoading && customerList.length === 0 && (
-                <Text style={styles.customerEmptyText}>
-                  No customers found.
-                </Text>
+                <Text style={styles.customerEmptyText}>No customers found.</Text>
               )}
             </ScrollView>
 
-            {/* create new */}
             <View style={styles.customerNewBox}>
               <Text style={styles.customerNewTitle}>Create new</Text>
               <TextInput
@@ -2233,10 +2233,7 @@ export default function ProductsScreen({
                 onChangeText={setNewCustomerPhone}
               />
               <Pressable
-                style={[
-                  styles.customerSaveButton,
-                  savingCustomer && { opacity: 0.7 },
-                ]}
+                style={[styles.customerSaveButton, savingCustomer && { opacity: 0.7 }]}
                 onPress={handleCreateCustomer}
                 disabled={savingCustomer}
               >
@@ -2256,159 +2253,211 @@ export default function ProductsScreen({
         </View>
       </Modal>
 
-      {/* DISCOUNT MODE MODAL */}
+
+
+      {/* ------------------------ DISCOUNT MODE MODAL ------------------------ */}
       <Modal
-        visible={discountModeModalVisible && canUseAnyDiscount}
+        visible={discountModeModalVisible}
         transparent
         animationType="fade"
         onRequestClose={() => setDiscountModeModalVisible(false)}
       >
         <View style={styles.modalOverlay}>
-          <View style={styles.discountModeCard}>
-            {/* Open amount */}
-            <Pressable
-              style={[
-                styles.discountModeRow,
-                !canUseOpenDiscount && { opacity: 0.4 },
-              ]}
-              onPress={() => {
-                if (!canUseOpenDiscount) {
-                  Alert.alert(
-                    'No permission',
-                    'You are not allowed to apply open/manual discounts.',
-                  );
-                  return;
-                }
-                openDiscountInput('AMOUNT');
-              }}
-              disabled={!canUseOpenDiscount}
-            >
-              <Text style={styles.discountModeText}>Amount</Text>
-            </Pressable>
+          <View style={[styles.modalCard, { width: '35%' }]}>
+            <Text style={styles.modalTitle}>Discount</Text>
+            <Text style={styles.modalSub}>Choose discount type</Text>
 
-            {/* Open percent */}
-            <Pressable
-              style={[
-                styles.discountModeRow,
-                !canUseOpenDiscount && { opacity: 0.4 },
-              ]}
-              onPress={() => {
-                if (!canUseOpenDiscount) {
-                  Alert.alert(
-                    'No permission',
-                    'You are not allowed to apply open/manual discounts.',
-                  );
-                  return;
-                }
-                openDiscountInput('PERCENT');
-              }}
-              disabled={!canUseOpenDiscount}
-            >
-              <Text style={styles.discountModeText}>Percent</Text>
-            </Pressable>
+            <View style={{ gap: 10 }}>
+              <Pressable
+                onPress={() => openDiscountInput('AMOUNT')}
+                disabled={readOnlyCart || !canUseOpenDiscount}
+                style={{
+                  paddingVertical: 12,
+                  paddingHorizontal: 12,
+                  borderRadius: 12,
+                  backgroundColor: canUseOpenDiscount ? '#111827' : '#9ca3af',
+                  alignItems: 'center',
+                }}
+              >
+                <Text style={{ color: '#fff', fontWeight: '800' }}>
+                  OPEN AMOUNT
+                </Text>
+              </Pressable>
 
-            {/* Predefined list */}
+              <Pressable
+                onPress={() => openDiscountInput('PERCENT')}
+                disabled={readOnlyCart || !canUseOpenDiscount}
+                style={{
+                  paddingVertical: 12,
+                  paddingHorizontal: 12,
+                  borderRadius: 12,
+                  backgroundColor: canUseOpenDiscount ? '#111827' : '#9ca3af',
+                  alignItems: 'center',
+                }}
+              >
+                <Text style={{ color: '#fff', fontWeight: '800' }}>
+                  OPEN PERCENT
+                </Text>
+              </Pressable>
+
+              <Pressable
+                onPress={openPredefinedDiscount}
+                disabled={readOnlyCart || !canUsePredefinedDiscount}
+                style={{
+                  paddingVertical: 12,
+                  paddingHorizontal: 12,
+                  borderRadius: 12,
+                  backgroundColor: canUsePredefinedDiscount
+                    ? '#111827'
+                    : '#9ca3af',
+                  alignItems: 'center',
+                }}
+              >
+                <Text style={{ color: '#fff', fontWeight: '800' }}>
+                  PREDEFINED
+                </Text>
+              </Pressable>
+
+              {appliedDiscount && (
+                <Pressable
+                  onPress={() => {
+                    clearDiscount();
+                    setDiscountModeModalVisible(false);
+                  }}
+                  disabled={readOnlyCart}
+                  style={{
+                    paddingVertical: 12,
+                    paddingHorizontal: 12,
+                    borderRadius: 12,
+                    backgroundColor: '#b91c1c',
+                    alignItems: 'center',
+                  }}
+                >
+                  <Text style={{ color: '#fff', fontWeight: '800' }}>
+                    REMOVE DISCOUNT
+                  </Text>
+                </Pressable>
+              )}
+            </View>
+
             <Pressable
-              style={[
-                styles.discountModeRow,
-                !canUsePredefinedDiscount && { opacity: 0.4 },
-              ]}
-              onPress={openPredefinedDiscount}
-              disabled={!canUsePredefinedDiscount}
+              style={[styles.modalClose, { backgroundColor: '#374151' }]}
+              onPress={() => setDiscountModeModalVisible(false)}
             >
-              <Text style={styles.discountModeText}>Predefined</Text>
+              <Text style={styles.modalCloseText}>Close</Text>
             </Pressable>
           </View>
         </View>
       </Modal>
 
-      {/* DISCOUNT INPUT MODAL */}
+      {/* ------------------------ DISCOUNT INPUT MODAL ------------------------ */}
       <Modal
-        visible={discountInputModalVisible && canUseOpenDiscount}
+        visible={discountInputModalVisible}
         transparent
         animationType="fade"
         onRequestClose={() => setDiscountInputModalVisible(false)}
       >
         <View style={styles.modalOverlay}>
-          <View style={styles.discountInputCard}>
+          <View style={[styles.modalCard, { width: '35%' }]}>
             <Text style={styles.modalTitle}>
               {discountInputMode === 'PERCENT'
-                ? 'Discount percent'
-                : 'Discount amount'}
+                ? 'Discount Percent'
+                : 'Discount Amount'}
             </Text>
-
-            <Text style={styles.discountInputLabel}>
-              {discountInputMode === 'PERCENT'
-                ? 'Enter percentage (%)'
-                : 'Enter amount'}
+            <Text style={styles.modalSub}>
+              Enter {discountInputMode === 'PERCENT' ? '%' : 'amount'} value
             </Text>
 
             <TextInput
-              style={styles.discountInputField}
-              keyboardType="numeric"
-              placeholder={discountInputMode === 'PERCENT' ? '10' : '5.00'}
-              placeholderTextColor="#9ca3af"
               value={discountInputValue}
               onChangeText={setDiscountInputValue}
+              keyboardType="numeric"
+              editable={!readOnlyCart}
+              placeholder={discountInputMode === 'PERCENT' ? 'e.g. 10' : 'e.g. 5'}
+              placeholderTextColor="#9ca3af"
+              style={{
+                borderWidth: 1,
+                borderColor: '#d1d5db',
+                borderRadius: 12,
+                paddingHorizontal: 12,
+                paddingVertical: 10,
+                fontSize: 14,
+                color: '#111827',
+                backgroundColor: '#f9fafb',
+              }}
             />
 
-            <View style={styles.discountInputButtonsRow}>
-              <Pressable
-                style={styles.discountInputCancel}
-                onPress={() => setDiscountInputModalVisible(false)}
-              >
-                <Text style={styles.discountInputCancelText}>Cancel</Text>
-              </Pressable>
-              <Pressable
-                style={styles.discountInputApply}
-                onPress={applyDiscountInput}
-              >
-                <Text style={styles.discountInputApplyText}>Apply</Text>
-              </Pressable>
-            </View>
+            <Pressable
+              onPress={applyDiscountInput}
+              disabled={readOnlyCart}
+              style={{
+                marginTop: 12,
+                paddingVertical: 12,
+                borderRadius: 12,
+                backgroundColor: '#111827',
+                alignItems: 'center',
+              }}
+            >
+              <Text style={{ color: '#fff', fontWeight: '800' }}>APPLY</Text>
+            </Pressable>
+
+            <Pressable
+              style={[styles.modalClose, { backgroundColor: '#374151' }]}
+              onPress={() => setDiscountInputModalVisible(false)}
+            >
+              <Text style={styles.modalCloseText}>Close</Text>
+            </Pressable>
           </View>
         </View>
       </Modal>
 
-      {/* PREDEFINED DISCOUNTS MODAL */}
+      {/* ------------------------ DISCOUNT PRESET MODAL ------------------------ */}
       <Modal
-        visible={discountPresetModalVisible && canUsePredefinedDiscount}
+        visible={discountPresetModalVisible}
         transparent
         animationType="fade"
         onRequestClose={() => setDiscountPresetModalVisible(false)}
       >
         <View style={styles.modalOverlay}>
-          <View style={styles.discountPresetCard}>
-            <Text style={styles.modalTitle}>Predefined discounts</Text>
+          <View style={[styles.modalCard, { width: '45%' }]}>
+            <Text style={styles.modalTitle}>Predefined Discounts</Text>
+            <Text style={styles.modalSub}>Select an applicable discount</Text>
 
-            <ScrollView style={{ maxHeight: 260 }}>
+            <ScrollView style={{ maxHeight: 320 }}>
               {applicableDiscounts.map((d) => (
                 <Pressable
                   key={d.id}
-                  style={styles.discountPresetRow}
                   onPress={() => applyPredefinedDiscount(d)}
+                  disabled={readOnlyCart}
+                  style={{
+                    paddingVertical: 12,
+                    paddingHorizontal: 12,
+                    borderRadius: 12,
+                    borderWidth: 1,
+                    borderColor: '#e5e7eb',
+                    backgroundColor: '#ffffff',
+                    marginBottom: 8,
+                  }}
                 >
-                  <Text style={styles.discountPresetName}>{d.name}</Text>
-                  <Text style={styles.discountPresetMeta}>
-                    {d.mode === 'PERCENT'
-                      ? `${d.value}%`
-                      : `${toMoney(d.value)}`}
-                    {d.scope
-                      ? ` • ${d.scope === 'ITEM' ? 'Per item' : 'Order'}`
-                      : ''}
+                  <Text style={{ fontWeight: '900', color: '#111827' }}>
+                    {d.name}
+                  </Text>
+                  <Text style={{ fontSize: 12, color: '#6b7280', marginTop: 4 }}>
+                    {d.mode === 'PERCENT' ? `${d.value}%` : `${toMoney(d.value)}`}
+                    {d.scope ? ` • ${d.scope}` : ''}
                   </Text>
                 </Pressable>
               ))}
 
               {applicableDiscounts.length === 0 && (
-                <Text style={styles.discountPresetEmpty}>
-                  No predefined discounts.
+                <Text style={{ fontSize: 12, color: '#6b7280' }}>
+                  No applicable discounts.
                 </Text>
               )}
             </ScrollView>
 
             <Pressable
-              style={[styles.modalClose, { marginTop: 12 }]}
+              style={[styles.modalClose, { backgroundColor: '#374151' }]}
               onPress={() => setDiscountPresetModalVisible(false)}
             >
               <Text style={styles.modalCloseText}>Close</Text>
@@ -2422,10 +2471,7 @@ export default function ProductsScreen({
 
 /* ------------------------ STYLES ------------------------ */
 const styles = StyleSheet.create({
-  root: {
-    flex: 1,
-    backgroundColor: '#f3f4f6',
-  },
+  root: { flex: 1, backgroundColor: '#f3f4f6' },
   topBar: {
     paddingHorizontal: 16,
     paddingVertical: 8,
@@ -2436,15 +2482,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
   },
-  topSub: {
-    fontSize: 13,
-    color: '#4b5563',
-  },
-  mainRow: {
-    flex: 1,
-    flexDirection: 'row',
-  },
-  orderPanel: {    /* LEFT – Order panel */
+  topSub: { fontSize: 13, color: '#4b5563' },
+  mainRow: { flex: 1, flexDirection: 'row' },
+
+  orderPanel: {
     width: '30%',
     backgroundColor: '#ffffff',
     borderRightWidth: 1,
@@ -2465,11 +2506,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#111827',
   },
-  customerButtonText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#111827',
-  },
+  customerButtonText: { fontSize: 12, fontWeight: '600', color: '#111827' },
   orderTypeTag: {
     paddingHorizontal: 12,
     paddingVertical: 6,
@@ -2477,20 +2514,14 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#111827',
   },
-  orderTypeText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#111827',
-  },
+  orderTypeText: { fontSize: 12, fontWeight: '600', color: '#111827' },
   orderTitle: {
     fontSize: 16,
     fontWeight: '700',
     marginBottom: 8,
     color: '#111827',
   },
-  orderList: {
-    flex: 1,
-  },
+  orderList: { flex: 1 },
   orderRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
@@ -2499,10 +2530,7 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#e5e7eb',
   },
-  orderLineTop: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
+  orderLineTop: { flexDirection: 'row', alignItems: 'center' },
   orderItemName: {
     fontSize: 13,
     fontWeight: '600',
@@ -2523,11 +2551,7 @@ const styles = StyleSheet.create({
     minWidth: 50,
     textAlign: 'right',
   },
-  orderItemModifiers: {
-    fontSize: 11,
-    color: '#6b7280',
-    marginTop: 2,
-  },
+  orderItemModifiers: { fontSize: 11, color: '#6b7280', marginTop: 2 },
   qtyBox: {
     flexDirection: 'row',
     marginLeft: 8,
@@ -2557,21 +2581,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     backgroundColor: '#f9fafb',
   },
-  qtyMid: {
-    paddingHorizontal: 8,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  qtyText: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: '#111827',
-  },
-  qtyValue: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#111827',
-  },
+  qtyMid: { paddingHorizontal: 8, justifyContent: 'center', alignItems: 'center' },
+  qtyText: { fontSize: 14, fontWeight: '700', color: '#111827' },
+  qtyValue: { fontSize: 13, fontWeight: '600', color: '#111827' },
   orderFooter: {
     paddingTop: 8,
     borderTopWidth: 1,
@@ -2585,55 +2597,25 @@ const styles = StyleSheet.create({
     marginBottom: 2,
     alignItems: 'center',
   },
-  summaryLabel: {
-    fontSize: 12,
-    color: '#6b7280',
-  },
-  summaryValue: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#111827',
-  },
-
-  discountClearText: {
-    fontSize: 10,
-    color: '#b91c1c',
-    textAlign: 'right',
-  },
+  summaryLabel: { fontSize: 12, color: '#6b7280' },
+  summaryValue: { fontSize: 12, fontWeight: '600', color: '#111827' },
+  discountClearText: { fontSize: 10, color: '#b91c1c', textAlign: 'right' },
   paymentsSummaryBox: {
     marginTop: 4,
     paddingTop: 4,
     borderTopWidth: 1,
     borderTopColor: '#e5e7eb',
   },
-  paymentSummaryRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-  },
-  paymentSummaryLabel: {
-    fontSize: 11,
-    color: '#6b7280',
-  },
-  paymentSummaryValue: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: '#111827',
-  },
+  paymentSummaryRow: { flexDirection: 'row', justifyContent: 'space-between' },
+  paymentSummaryLabel: { fontSize: 11, color: '#6b7280' },
+  paymentSummaryValue: { fontSize: 11, fontWeight: '600', color: '#111827' },
   paymentSummaryTotalRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     marginTop: 2,
   },
-  paymentSummaryTotalLabel: {
-    fontSize: 11,
-    color: '#111827',
-    fontWeight: '700',
-  },
-  paymentSummaryTotalValue: {
-    fontSize: 11,
-    color: '#111827',
-    fontWeight: '700',
-  },
+  paymentSummaryTotalLabel: { fontSize: 11, color: '#111827', fontWeight: '700' },
+  paymentSummaryTotalValue: { fontSize: 11, color: '#111827', fontWeight: '700' },
   totalButton: {
     marginLeft: 12,
     paddingHorizontal: 14,
@@ -2642,26 +2624,11 @@ const styles = StyleSheet.create({
     backgroundColor: BLACK,
     alignItems: 'center',
   },
-  totalButtonLabel: {
-    fontSize: 11,
-    color: '#ffffff',
-    fontWeight: '600',
-  },
-  totalButtonValue: {
-    fontSize: 14,
-    color: '#ffffff',
-    fontWeight: '700',
-  },
-  productsPanel: {    /* RIGHT – Products panel */
-    flex: 1,
-    paddingHorizontal: 20,
-    paddingVertical: 14,
-  },
-  actionRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    marginBottom: 12,
-  },
+  totalButtonLabel: { fontSize: 11, color: '#ffffff', fontWeight: '600' },
+  totalButtonValue: { fontSize: 14, color: '#ffffff', fontWeight: '700' },
+
+  productsPanel: { flex: 1, paddingHorizontal: 20, paddingVertical: 14 },
+  actionRow: { flexDirection: 'row', flexWrap: 'wrap', marginBottom: 12 },
   actionButton: {
     height: 44,
     minWidth: 80,
@@ -2673,14 +2640,8 @@ const styles = StyleSheet.create({
     marginRight: 8,
     marginBottom: 8,
   },
-  actionText: {
-    color: '#ffffff',
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  searchBox: {
-    marginBottom: 8,
-  },
+  actionText: { color: '#ffffff', fontSize: 11, fontWeight: '600' },
+  searchBox: { marginBottom: 8 },
   searchInput: {
     borderWidth: 1,
     borderColor: '#d1d5db',
@@ -2691,16 +2652,8 @@ const styles = StyleSheet.create({
     color: '#111827',
     backgroundColor: '#f9fafb',
   },
-  productsCenter: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  productsGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    paddingBottom: 24,
-  },
+  productsCenter: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  productsGrid: { flexDirection: 'row', flexWrap: 'wrap', paddingBottom: 24 },
   productTile: {
     width: '22%',
     marginRight: 12,
@@ -2711,25 +2664,15 @@ const styles = StyleSheet.create({
     borderColor: '#e5e7eb',
     overflow: 'hidden',
   },
-  productPressArea: {
-    flex: 1,
-  },
+  productPressArea: { flex: 1 },
   productImageWrap: {
     height: 90,
     backgroundColor: '#f3f4f6',
     justifyContent: 'center',
     alignItems: 'center',
   },
-  backText: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: '#111827',
-  },
-  productImage: {
-    width: '100%',
-    height: '100%',
-    resizeMode: 'cover',
-  },
+  backText: { fontSize: 14, fontWeight: '700', color: '#111827' },
+  productImage: { width: '100%', height: '100%', resizeMode: 'cover' },
   productImagePlaceholder: {
     width: '50%',
     height: '50%',
@@ -2738,11 +2681,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
-  productPlaceholderText: {
-    color: '#6b7280',
-    fontSize: 12,
-    fontWeight: '600',
-  },
+  productPlaceholderText: { color: '#6b7280', fontSize: 12, fontWeight: '600' },
   productName: {
     paddingHorizontal: 8,
     paddingVertical: 6,
@@ -2766,11 +2705,9 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     marginHorizontal: 4,
   },
-  qtyMidSmall: {
-    minWidth: 24,
-    alignItems: 'center',
-  },
-  paymentFooter: {  /* Payment footer */
+  qtyMidSmall: { minWidth: 24, alignItems: 'center' },
+
+  paymentFooter: {
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 24,
@@ -2779,48 +2716,31 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: '#e5e7eb',
   },
-  remainingLabel: {
-    fontSize: 12,
-    color: '#6b7280',
-    marginRight: 8,
-  },
+  remainingLabel: { fontSize: 12, color: '#6b7280', marginRight: 8 },
   remainingValue: {
     fontSize: 14,
     fontWeight: '700',
     color: '#111827',
     marginRight: 12,
   },
-  changeLabel: {
-    fontSize: 12,
-    color: '#6b7280',
-    marginRight: 8,
-  },
+  changeLabel: { fontSize: 12, color: '#6b7280', marginRight: 8 },
   changeValue: {
     fontSize: 14,
     fontWeight: '700',
     color: '#16a34a',
     marginRight: 12,
   },
-  clearPaymentsText: {
-    fontSize: 11,
-    color: '#b91c1c',
-    fontWeight: '600',
-  },
+  clearPaymentsText: { fontSize: 11, color: '#b91c1c', fontWeight: '600' },
   payButton: {
     paddingHorizontal: 18,
     paddingVertical: 10,
     borderRadius: 999,
     backgroundColor: '#16a34a',
   },
-  payButtonDisabled: {
-    backgroundColor: '#9ca3af',
-  },
-  payButtonText: {
-    color: '#ffffff',
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  bottomBar: {  /* Bottom nav bar */
+  payButtonDisabled: { backgroundColor: '#9ca3af' },
+  payButtonText: { color: '#ffffff', fontSize: 13, fontWeight: '700' },
+
+  bottomBar: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-around',
@@ -2830,19 +2750,9 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: '#e5e7eb',
   },
-  bottomItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  bottomIcon: {
-    fontSize: 18,
-    marginRight: 6,
-  },
-  bottomLabel: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#111827',
-  },
+  bottomItem: { flexDirection: 'row', alignItems: 'center' },
+  bottomIcon: { fontSize: 18, marginRight: 6 },
+  bottomLabel: { fontSize: 12, fontWeight: '600', color: '#111827' },
   bottomBadge: {
     backgroundColor: 'red',
     borderRadius: 999,
@@ -2853,12 +2763,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  bottomBadgeText: {
-    color: '#ffffff',
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  modalOverlay: { /* Modals */
+  bottomBadgeText: { color: '#ffffff', fontSize: 11, fontWeight: '700' },
+
+  modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.45)',
     justifyContent: 'center',
@@ -2877,11 +2784,8 @@ const styles = StyleSheet.create({
     marginBottom: 4,
     color: '#111827',
   },
-  modalSub: {
-    fontSize: 13,
-    color: '#6b7280',
-    marginBottom: 10,
-  },
+  modalSub: { fontSize: 13, color: '#6b7280', marginBottom: 10 },
+
   sizeRow: {
     flexDirection: 'row',
     alignItems: 'stretch',
@@ -2903,26 +2807,16 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  sizeName: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#111827',
-  },
-  sizePriceValue: {
-    fontSize: 13,
-    color: '#374151',
-    marginTop: 2,
-  },
-  sizeQtyLabel: {
-    fontSize: 11,
-    color: '#6b7280',
-  },
+  sizeName: { fontSize: 14, fontWeight: '600', color: '#111827' },
+  sizePriceValue: { fontSize: 13, color: '#374151', marginTop: 2 },
+  sizeQtyLabel: { fontSize: 11, color: '#6b7280' },
   sizeQtyValue: {
     fontSize: 16,
     fontWeight: '700',
     color: '#111827',
     marginTop: 2,
   },
+
   modalClose: {
     marginTop: 12,
     alignSelf: 'flex-end',
@@ -2931,43 +2825,71 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     backgroundColor: '#111827',
   },
-  modalCloseText: {
-    color: '#ffffff',
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  orderTypeCard: {
-    width: 320,
-    backgroundColor: '#ffffff',
-    borderRadius: 14,
-    overflow: 'hidden',
-    shadowColor: '#000',
-    shadowOpacity: 0.15,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 6,
-  },
-  orderTypeRow: {
+  modalCloseText: { color: '#ffffff', fontSize: 13, fontWeight: '600' },
+
+  methodBtn: {
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    borderRadius: 10,
     paddingVertical: 12,
-    paddingHorizontal: 16,
-    borderTopWidth: 1,
-    borderTopColor: '#f3f4f6',
-    alignItems: 'center',
-    justifyContent: 'center',
+    paddingHorizontal: 12,
+    marginBottom: 10,
+    backgroundColor: '#ffffff',
   },
-  orderTypeRowText: {
-    fontSize: 15,
+  methodBtnActive: {
+    borderColor: '#111827',
+    backgroundColor: '#f3f4f6',
+  },
+  methodText: {
+    fontSize: 14,
+    fontWeight: '700',
     color: '#111827',
   },
-  orderTypeTitle: {
+
+  quickRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginTop: 8,
+  },
+  quickBtn: {
+    backgroundColor: '#111827',
+    borderRadius: 999,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    marginRight: 10,
+    marginBottom: 10,
+  },
+  quickText: {
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+
+  customRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 6,
+  },
+  customInput: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: '#d1d5db',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: '#f9fafb',
+    marginRight: 10,
+  },
+  doneBtn: {
+    backgroundColor: '#111827',
+    borderRadius: 999,
     paddingVertical: 10,
     paddingHorizontal: 16,
-    fontSize: 16,
-    fontWeight: '600',
-    textAlign: 'center',
-    color: '#111827',
-    borderBottomWidth: 1,
-    borderBottomColor: '#e5e7eb',
+  },
+  doneText: {
+    color: '#ffffff',
+    fontSize: 13,
+    fontWeight: '700',
   },
   paymentCard: {
     width: '30%',
@@ -2985,89 +2907,125 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#111827',
   },
+
   amountCard: {
-    width: '40%',
-    maxHeight: '40%',
+    width: '30%',
+    maxHeight: '80%',
     backgroundColor: '#ffffff',
     borderRadius: 14,
     padding: 16,
   },
   amountHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'baseline',
-    marginBottom: 8,
+    marginBottom: 10,
   },
   amountRemainingText: {
     fontSize: 12,
     color: '#6b7280',
+    marginTop: 4,
+    fontWeight: '700',
   },
   amountRow: {
+    backgroundColor: '#111827',
+    borderRadius: 999,
     paddingVertical: 10,
+    paddingHorizontal: 14,
+    marginBottom: 10,
+    alignItems: 'center',
+  },
+  amountText: {
+    color: '#ffffff',
+    fontWeight: '700',
+    fontSize: 12,
+  },
+
+  customAmountBox: { marginTop: 10 },
+  customLabel: { fontSize: 12, color: '#6b7280', marginBottom: 6 },
+  customInput: {
+    borderWidth: 1,
+    borderColor: '#d1d5db',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 14,
+    backgroundColor: '#f9fafb',
+    color: '#111827',
+  },
+  customApplyButton: {
+    marginTop: 10,
+    backgroundColor: '#111827',
+    borderRadius: 999,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  customApplyText: { color: '#fff', fontWeight: '700' },
+  amountHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  amountTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#111827',
+  },
+  amountRemaining: {
+    fontSize: 12,
+    color: '#6b7280',
+  },
+
+  amountListRow: {
+    paddingVertical: 14,
     borderBottomWidth: 1,
     borderBottomColor: '#f3f4f6',
   },
-  amountText: {
-    fontSize: 16,
+  amountListRowPressed: {
+    backgroundColor: '#f9fafb',
+  },
+  amountListText: {
+    fontSize: 14,
     fontWeight: '600',
     color: '#111827',
   },
-  amountCancelRow: {
+
+  customInlineBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
     marginTop: 10,
-    paddingVertical: 10,
+    gap: 10,
   },
-  amountCancelText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#b91c1c',
-    textAlign: 'center',
-  },
-  customAmountBox: {
-    marginTop: 10,
-    paddingTop: 8,
-    borderTopWidth: 1,
-    borderTopColor: '#e5e7eb',
-  },
-  customLabel: {
-    fontSize: 12,
-    color: '#6b7280',
-    marginBottom: 4,
-  },
-  customInput: {
+  customInlineInput: {
+    flex: 1,
     borderWidth: 1,
     borderColor: '#d1d5db',
     borderRadius: 8,
     paddingHorizontal: 10,
-    paddingVertical: 6,
-    fontSize: 14,
-    color: '#111827',
-    marginBottom: 8,
-  },
-  customApplyButton: {
-    alignSelf: 'flex-end',
-    paddingHorizontal: 14,
     paddingVertical: 8,
-    borderRadius: 999,
-    backgroundColor: BLACK,
+    backgroundColor: '#fff',
+    color: '#111827',
   },
-  customApplyText: {
-    color: '#ffffff',
-    fontSize: 13,
-    fontWeight: '600',
+  customInlineOk: {
+    paddingHorizontal: 10,
+    paddingVertical: 8,
   },
-  customerCard: {  /* Customers modal */
-    width: '35%',
-    maxHeight: '85%',
-    backgroundColor: '#ffffff',
-    borderRadius: 14,
-    padding: 16,
+  customInlineOkText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#111827',
   },
-  customerSearchRow: {
-    flexDirection: 'row',
+
+  cancelRow: {
+    marginTop: 16,
     alignItems: 'center',
-    marginTop: 8,
-    marginBottom: 8,
   },
+  cancelText: {
+    color: '#dc2626',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+
+  customerCard: { width: '35%', maxHeight: '85%', backgroundColor: '#ffffff', borderRadius: 14, padding: 16 },
+  customerSearchRow: { flexDirection: 'row', alignItems: 'center', marginTop: 8, marginBottom: 8 },
   customerSearchInput: {
     flex: 1,
     borderWidth: 1,
@@ -3079,53 +3037,15 @@ const styles = StyleSheet.create({
     color: '#111827',
     marginRight: 8,
   },
-  customerSearchButton: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 999,
-    backgroundColor: BLACK,
-  },
-  customerSearchButtonText: {
-    color: '#ffffff',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  customerLoadingBox: {
-    paddingVertical: 16,
-    alignItems: 'center',
-  },
-  customerRow: {
-    paddingVertical: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f3f4f6',
-  },
-  customerName: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#111827',
-  },
-  customerPhone: {
-    fontSize: 12,
-    color: '#6b7280',
-    marginTop: 2,
-  },
-  customerEmptyText: {
-    fontSize: 12,
-    color: '#6b7280',
-    marginTop: 8,
-  },
-  customerNewBox: {
-    marginTop: 10,
-    paddingTop: 10,
-    borderTopWidth: 1,
-    borderTopColor: '#e5e7eb',
-  },
-  customerNewTitle: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#111827',
-    marginBottom: 4,
-  },
+  customerSearchButton: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999, backgroundColor: BLACK },
+  customerSearchButtonText: { color: '#ffffff', fontSize: 12, fontWeight: '600' },
+  customerLoadingBox: { paddingVertical: 16, alignItems: 'center' },
+  customerRow: { paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: '#f3f4f6' },
+  customerName: { fontSize: 14, fontWeight: '600', color: '#111827' },
+  customerPhone: { fontSize: 12, color: '#6b7280', marginTop: 2 },
+  customerEmptyText: { fontSize: 12, color: '#6b7280', marginTop: 8 },
+  customerNewBox: { marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: '#e5e7eb' },
+  customerNewTitle: { fontSize: 13, fontWeight: '600', color: '#111827', marginBottom: 4 },
   customerInput: {
     borderWidth: 1,
     borderColor: '#e5e7eb',
@@ -3136,111 +3056,9 @@ const styles = StyleSheet.create({
     color: '#111827',
     marginBottom: 6,
   },
-  customerSaveButton: {
-    alignSelf: 'flex-end',
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 999,
-    backgroundColor: BLACK,
-  },
-  customerSaveText: {
-    color: '#ffffff',
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  discountModeCard: {  /* Discount modals */
-    width: '30%',
-    backgroundColor: '#ffffff',
-    borderRadius: 14,
-    overflow: 'hidden',
-  },
-  discountModeRow: {
-    paddingVertical: 14,
-    paddingHorizontal: 20,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f3f4f6',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  discountModeText: {
-    fontSize: 15,
-    fontWeight: '500',
-    color: '#111827',
-  },
-  discountInputCard: {
-    width: '30%',
-    backgroundColor: '#ffffff',
-    borderRadius: 14,
-    padding: 16,
-  },
-  discountInputLabel: {
-    fontSize: 13,
-    color: '#6b7280',
-    marginTop: 8,
-    marginBottom: 6,
-  },
-  discountInputField: {
-    borderWidth: 1,
-    borderColor: '#d1d5db',
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    fontSize: 14,
-    color: '#111827',
-  },
-  discountInputButtonsRow: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    marginTop: 12,
-  },
-  discountInputCancel: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 999,
-    marginRight: 6,
-    backgroundColor: '#e5e7eb',
-  },
-  discountInputCancelText: {
-    fontSize: 13,
-    color: '#111827',
-    fontWeight: '500',
-  },
-  discountInputApply: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 999,
-    backgroundColor: BLACK,
-  },
-  discountInputApplyText: {
-    fontSize: 13,
-    color: '#ffffff',
-    fontWeight: '600',
-  },
-  discountPresetCard: {
-    width: '30%',
-    maxHeight: '70%',
-    backgroundColor: '#ffffff',
-    borderRadius: 14,
-    padding: 16,
-  },
-  discountPresetRow: {
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f3f4f6',
-  },
-  discountPresetName: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#111827',
-  },
-  discountPresetMeta: {
-    fontSize: 12,
-    color: '#6b7280',
-    marginTop: 2,
-  },
-  discountPresetEmpty: {
-    fontSize: 12,
-    color: '#6b7280',
-    marginTop: 8,
-  },
+  customerSaveButton: { alignSelf: 'flex-end', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999, backgroundColor: BLACK },
+  customerSaveText: { color: '#ffffff', fontSize: 13, fontWeight: '600' },
+
+
+
 });
