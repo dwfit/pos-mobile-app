@@ -19,6 +19,7 @@
     "android": {
       "package": "sa.com.dwf.posmobile",
       "versionCode": 1,
+      "usesCleartextTraffic": true,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#111827"

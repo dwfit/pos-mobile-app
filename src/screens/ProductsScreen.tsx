@@ -17,10 +17,7 @@ import { get, post } from '../lib/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getDb } from '../database/db'; // SQLite + sync
 import { syncMenu } from '../sync/menuSync';
-import {
-  saveOrdersToSQLite as saveOrdersLocal,
-  LocalOrder,
-} from '../database/ordersLocal';
+import { saveOrdersToSQLite as saveOrdersLocal, LocalOrder } from '../database/ordersLocal';
 
 type ProductSize = {
   id: string;
@@ -102,11 +99,25 @@ const BLACK = '#000000';
 const DISCOUNT_STORAGE_KEY = 'pos_applied_discount';
 
 /* ------------------------ SHARED HELPERS ------------------------ */
+const API_BASE = process.env.EXPO_PUBLIC_API_URL || 'http://192.168.100.245:4000';
+
+function normalizeImageUrl(url?: string | null) {
+  if (!url) return null;
+
+  const u = String(url).trim();
+  if (!u) return null;
+
+  if (u.startsWith('http://') || u.startsWith('https://')) {
+    return u;
+  }
+
+  const base = API_BASE.replace(/\/+$/, '');
+  const p = u.startsWith('/') ? u : `/${u}`;
+  return `${base}${p}`;
+}
+
 function toMoney(value: any): string {
-  const n =
-    typeof value === 'number'
-      ? value
-      : parseFloat(value != null ? String(value) : '0');
+  const n = typeof value === 'number' ? value : parseFloat(value != null ? String(value) : '0');
   if (Number.isNaN(n)) return '0.00';
   return n.toFixed(2);
 }
@@ -129,9 +140,7 @@ function calcLineTotal(line: CartItem): number {
   return (base + mods) * line.qty;
 }
 
-function normalizeOrderTypeLabel(
-  label: string | null | undefined,
-): string | null {
+function normalizeOrderTypeLabel(label: string | null | undefined): string | null {
   if (!label) return null;
   const raw = String(label).trim().toLowerCase().replace(/\s+/g, ' ');
   if (raw.includes('dine')) return 'DINE_IN';
@@ -142,6 +151,66 @@ function normalizeOrderTypeLabel(
   const fallback = String(label).trim().toUpperCase().replace(/\s+/g, '_');
   if (fallback === 'PICK_UP') return 'TAKE_AWAY';
   return fallback;
+}
+
+/* ------------------------ BRAND/DEVICE HELPERS (FIX brandId required) ------------------------ */
+async function readDeviceInfo(): Promise<{
+  branchId: string | null;
+  brandId: string | null;
+  deviceId: string | null;
+}> {
+  try {
+    const raw = await AsyncStorage.getItem('deviceInfo');
+    if (!raw) return { branchId: null, brandId: null, deviceId: null };
+    const d = JSON.parse(raw);
+    return {
+      deviceId: d?.deviceId ? String(d.deviceId) : d?.id ? String(d.id) : null,
+      brandId: d?.brandId ? String(d.brandId) : d?.brand?.id ? String(d.brand.id) : null,
+      branchId: d?.branchId ? String(d.branchId) : d?.branch?.id ? String(d.branch.id) : null,
+    };
+  } catch {
+    return { branchId: null, brandId: null, deviceId: null };
+  }
+}
+
+async function readPosBrand(): Promise<{ id: string | null; name: string | null; code: string | null }> {
+  try {
+    const raw = await AsyncStorage.getItem('pos_brand');
+    if (!raw) return { id: null, name: null, code: null };
+    const b = JSON.parse(raw);
+    return {
+      id: b?.id ? String(b.id) : null,
+      name: b?.name ?? null,
+      code: b?.code ?? null,
+    };
+  } catch {
+    return { id: null, name: null, code: null };
+  }
+}
+
+/**
+ * Effective brandId:
+ *  1) state (caller passes)
+ *  2) pos_brand
+ *  3) deviceInfo
+ *  4) /pos/config fallback (your API returns brandId there)
+ */
+async function getEffectiveBrandId(currentBrandId: string | null): Promise<string | null> {
+  if (currentBrandId) return currentBrandId;
+
+  const pb = await readPosBrand();
+  if (pb.id) return pb.id;
+
+  const dev = await readDeviceInfo();
+  if (dev.brandId) return dev.brandId;
+
+  try {
+    const cfg = await get('/pos/config');
+    const bid = (cfg as any)?.brandId;
+    if (bid) return String(bid);
+  } catch {}
+
+  return null;
 }
 
 /* ------------------------ LocalOrder helper (for SQLite cache) ------------------------ */
@@ -168,22 +237,14 @@ function toLocalOrder(o: any): LocalOrder {
 }
 
 /* ------------------------ SQLITE HELPERS ------------------------ */
-async function loadProductsFromSQLite(
-  categoryId?: string | null,
-): Promise<Product[]> {
+async function loadProductsFromSQLite(categoryId?: string | null): Promise<Product[]> {
   const db = await getDb();
   let baseProducts: any[] = [];
 
   if (categoryId) {
     baseProducts = await db.getAllAsync<any>(
       `
-      SELECT
-        id,
-        name,
-        price AS basePrice,
-        imageUrl,
-        isActive,
-        categoryId
+      SELECT id, name, price AS basePrice, imageUrl, isActive, categoryId
       FROM products
       WHERE categoryId = ? AND isActive = 1
       ORDER BY name ASC
@@ -193,13 +254,7 @@ async function loadProductsFromSQLite(
   } else {
     baseProducts = await db.getAllAsync<any>(
       `
-      SELECT
-        id,
-        name,
-        price AS basePrice,
-        imageUrl,
-        isActive,
-        categoryId
+      SELECT id, name, price AS basePrice, imageUrl, isActive, categoryId
       FROM products
       WHERE isActive = 1
       ORDER BY name ASC
@@ -224,9 +279,7 @@ async function loadProductsFromSQLite(
 
   const sizesByProduct: Record<string, ProductSize[]> = {};
   (sizeRows || []).forEach((s) => {
-    if (!sizesByProduct[s.productId]) {
-      sizesByProduct[s.productId] = [];
-    }
+    if (!sizesByProduct[s.productId]) sizesByProduct[s.productId] = [];
     sizesByProduct[s.productId].push({
       id: s.id,
       name: s.name,
@@ -234,7 +287,7 @@ async function loadProductsFromSQLite(
     });
   });
 
-  const mapped: Product[] = baseProducts.map((p: any) => ({
+  return baseProducts.map((p: any) => ({
     id: p.id,
     name: p.name,
     basePrice: p.basePrice,
@@ -243,8 +296,6 @@ async function loadProductsFromSQLite(
     sizes: sizesByProduct[p.id] || [],
     categoryId: p.categoryId ?? null,
   }));
-
-  return mapped;
 }
 
 /* ------------------------ COMPONENT ------------------------ */
@@ -257,14 +308,7 @@ export default function ProductsScreen({
   setActiveOrderId,
   online,
 }: any) {
-  const {
-    categoryId,
-    branchName,
-    userName,
-    goBack,
-    reopenFromCallcenter,
-  } = route.params || {};
-
+  const { categoryId, branchName, userName, goBack, reopenFromCallcenter } = route.params || {};
   const readOnlyCart: boolean = !!reopenFromCallcenter;
 
   const [brandName, setBrandName] = useState<string | null>(null);
@@ -284,36 +328,28 @@ export default function ProductsScreen({
   const [orderType, setOrderType] = useState<string | null>(null);
   const [orderTypeModalVisible, setOrderTypeModalVisible] = useState(false);
 
-  // Payment
-  const [paymentModalVisible, setPaymentModalVisible] = useState(false);
+  
+  const [paymentModalVisible, setPaymentModalVisible] = useState(false); // Payment
   const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([]);
   const [vatRate, setVatRate] = useState<number>(15);
   const [payments, setPayments] = useState<PaymentEntry[]>([]);
   const [paying, setPaying] = useState(false);
   const [voidLoading, setVoidLoading] = useState(false);
 
-
   const [selectedPaymentMethodId, setSelectedPaymentMethodId] = useState<string | null>(null);
   const [showCustomAmount, setShowCustomAmount] = useState(false);
   const [customAmountInput, setCustomAmountInput] = useState('');
-
 
   // Orders badge
   const [ordersBadge, setOrdersBadge] = useState(0);
 
   // Discounts
   const [discountConfigs, setDiscountConfigs] = useState<DiscountConfig[]>([]);
-  const [appliedDiscount, setAppliedDiscount] =
-    useState<AppliedDiscount | null>(null);
-  const [discountModeModalVisible, setDiscountModeModalVisible] =
-    useState(false);
-  const [discountInputModalVisible, setDiscountInputModalVisible] =
-    useState(false);
-  const [discountPresetModalVisible, setDiscountPresetModalVisible] =
-    useState(false);
-  const [discountInputMode, setDiscountInputMode] = useState<
-    'AMOUNT' | 'PERCENT' | null
-  >(null);
+  const [appliedDiscount, setAppliedDiscount] = useState<AppliedDiscount | null>(null);
+  const [discountModeModalVisible, setDiscountModeModalVisible] = useState(false);
+  const [discountInputModalVisible, setDiscountInputModalVisible] = useState(false);
+  const [discountPresetModalVisible, setDiscountPresetModalVisible] = useState(false);
+  const [discountInputMode, setDiscountInputMode] = useState<'AMOUNT' | 'PERCENT' | null>(null);
   const [discountInputValue, setDiscountInputValue] = useState('');
 
   // Branch
@@ -325,8 +361,7 @@ export default function ProductsScreen({
   const [customerSearch, setCustomerSearch] = useState('');
   const [customerList, setCustomerList] = useState<CustomerSummary[]>([]);
   const [customerLoading, setCustomerLoading] = useState(false);
-  const [selectedCustomer, setSelectedCustomer] =
-    useState<CustomerSummary | null>(null);
+  const [selectedCustomer, setSelectedCustomer] = useState<CustomerSummary | null>(null);
   const [newCustomerName, setNewCustomerName] = useState('');
   const [newCustomerPhone, setNewCustomerPhone] = useState('');
   const [savingCustomer, setSavingCustomer] = useState(false);
@@ -334,23 +369,20 @@ export default function ProductsScreen({
   // Permissions
   const [userPermissions, setUserPermissions] = useState<string[]>([]);
 
+  const [tierModalVisible, setTierModalVisible] = useState(false);
+  const [tierLoading, setTierLoading] = useState(false);
+  const [tiers, setTiers] = useState<any[]>([]);
+  const [activeTier, setActiveTier] = useState<any | null>(null);
+
+
   /* ------------------------ LOAD DEVICE INFO (brandId/deviceId/branchId) ------------------------ */
   useEffect(() => {
     (async () => {
       try {
-        const rawDev = await AsyncStorage.getItem('deviceInfo');
-        if (!rawDev) return;
-
-        const d = JSON.parse(rawDev);
-
-        // deviceId could be stored as deviceId OR id depending on activation response
-        const devId = String(d?.deviceId ?? d?.id ?? '').trim();
-        const bId = String(d?.brandId ?? d?.brand?.id ?? '').trim();
-        const brId = String(d?.branchId ?? d?.branch?.id ?? '').trim();
-
-        if (devId) setDeviceId(devId);
-        if (bId) setBrandId(bId);
-        if (brId) setBranchId(brId);
+        const dev = await readDeviceInfo();
+        if (dev.deviceId) setDeviceId(dev.deviceId);
+        if (dev.brandId) setBrandId(dev.brandId);
+        if (dev.branchId) setBranchId(dev.branchId);
       } catch (e) {
         console.log('deviceInfo load error (ProductsScreen)', e);
       }
@@ -361,26 +393,26 @@ export default function ProductsScreen({
   useEffect(() => {
     (async () => {
       try {
-        const rawBrand = await AsyncStorage.getItem('pos_brand');
-        if (rawBrand) {
-          const b = JSON.parse(rawBrand);
-          setBrandName(b?.name ?? null);
-          setBrandCode(b?.code ?? null);
+        const pb = await readPosBrand();
+        if (pb.name) setBrandName(pb.name);
+        if (pb.code) setBrandCode(pb.code);
+        if (pb.id) setBrandId(pb.id);
 
-          // if pos_brand contains id
-          if (b?.id) setBrandId(String(b.id));
-          return;
+        if (!pb.id || !pb.name || !pb.code) {
+          const dev = await readDeviceInfo();
+          // keep old behavior too
+          const rawDev = await AsyncStorage.getItem('deviceInfo');
+          const d = rawDev ? JSON.parse(rawDev) : null;
+
+          setBrandName(pb.name ?? d?.brandName ?? d?.brand?.name ?? null);
+          setBrandCode(pb.code ?? d?.brandCode ?? d?.brand?.code ?? null);
+
+          if (!pb.id && dev.brandId) setBrandId(dev.brandId);
         }
 
-        const rawDev = await AsyncStorage.getItem('deviceInfo');
-        if (rawDev) {
-          const d = JSON.parse(rawDev);
-          setBrandName(d?.brandName ?? d?.brand?.name ?? null);
-          setBrandCode(d?.brandCode ?? d?.brand?.code ?? null);
-
-          if (d?.brandId) setBrandId(String(d.brandId));
-          else if (d?.brand?.id) setBrandId(String(d.brand.id));
-        }
+        // ✅ final fallback: /pos/config gives brandId
+        const effective = await getEffectiveBrandId(null);
+        if (effective) setBrandId(effective);
       } catch (e) {
         console.log('brand load error', e);
       }
@@ -393,7 +425,6 @@ export default function ProductsScreen({
       try {
         const raw = await AsyncStorage.getItem(DISCOUNT_STORAGE_KEY);
         if (!raw) return;
-
         const parsed = JSON.parse(raw);
         if (
           parsed &&
@@ -414,10 +445,7 @@ export default function ProductsScreen({
     (async () => {
       try {
         if (appliedDiscount) {
-          await AsyncStorage.setItem(
-            DISCOUNT_STORAGE_KEY,
-            JSON.stringify(appliedDiscount),
-          );
+          await AsyncStorage.setItem(DISCOUNT_STORAGE_KEY, JSON.stringify(appliedDiscount));
         } else {
           await AsyncStorage.removeItem(DISCOUNT_STORAGE_KEY);
         }
@@ -437,9 +465,7 @@ export default function ProductsScreen({
           return;
         }
         const u = JSON.parse(raw);
-        const perms: string[] = Array.isArray(u?.permissions)
-          ? u.permissions
-          : [];
+        const perms: string[] = Array.isArray(u?.permissions) ? u.permissions : [];
         setUserPermissions(perms);
       } catch (e) {
         console.log('pos_user permissions load error', e);
@@ -448,8 +474,21 @@ export default function ProductsScreen({
     })();
   }, []);
 
-  const hasPermission = (code: string) =>
-    Array.isArray(userPermissions) && userPermissions.includes(code);
+  useEffect(() => {
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem('pos_price_tier');
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (parsed && parsed.id) setActiveTier(parsed);
+      } catch (e) {
+        console.log('tier load err (ProductsScreen)', e);
+      }
+    })();
+  }, []);
+  
+
+  const hasPermission = (code: string) => Array.isArray(userPermissions) && userPermissions.includes(code);
 
   const canUseOpenDiscount =
     hasPermission('pos.discounts.open.apply') ||
@@ -472,6 +511,7 @@ export default function ProductsScreen({
       setError(null);
 
       try {
+        // 1) show cached sqlite immediately
         let prods: Product[] = [];
         try {
           prods = await loadProductsFromSQLite(categoryId);
@@ -485,19 +525,34 @@ export default function ProductsScreen({
           setLoading(false);
         }
 
-        if (!online) {
-          return;
-        }
+        // 2) if offline stop here
+        if (!online) return;
 
+        // ✅ IMPORTANT: brandId is required for sync + API menu calls
+        const bid = await getEffectiveBrandId(brandId);
+        if (bid) setBrandId(bid);
+
+        // 3) refresh menu from API -> sqlite
         try {
-          await syncMenu();
+          if (bid) {
+            await syncMenu({
+              brandId: bid,
+              includeInactive: true,
+              forceFull: true,
+              since: '1970-01-01T00:00:00.000Z',
+            } as any);
+          } else {
+            console.log('❌ syncMenu: brandId is required');
+          }
+
           if (cancelled) return;
 
           let fresh = await loadProductsFromSQLite(categoryId);
 
-          if (!fresh || fresh.length === 0) {
+          // 4) final fallback: API list (must include brandId)
+          if ((!fresh || fresh.length === 0) && bid) {
             try {
-              const apiAll = await get('/menu/products');
+              const apiAll = await get(`/menu/products?brandId=${encodeURIComponent(bid)}&includeInactive=true`);
               const apiArray = Array.isArray(apiAll) ? apiAll : [];
 
               fresh = apiArray
@@ -516,10 +571,10 @@ export default function ProductsScreen({
                   sizes:
                     Array.isArray(p.sizes) && p.sizes.length > 0
                       ? p.sizes.map((s: any) => ({
-                        id: s.id,
-                        name: s.name,
-                        price: s.price,
-                      }))
+                          id: s.id,
+                          name: s.name,
+                          price: s.price,
+                        }))
                       : [],
                   categoryId: p.categoryId ?? null,
                 }));
@@ -549,7 +604,7 @@ export default function ProductsScreen({
     return () => {
       cancelled = true;
     };
-  }, [categoryId, online]);
+  }, [categoryId, online, brandId]);
 
   /* ------------------------ AUTO SYNC (MENU) ------------------------ */
   useEffect(() => {
@@ -560,8 +615,22 @@ export default function ProductsScreen({
 
     const id = setInterval(async () => {
       try {
-        await syncMenu();
+        const bid = await getEffectiveBrandId(brandId);
+        if (bid) setBrandId(bid);
+
+        if (bid) {
+          await syncMenu({
+            brandId: bid,
+            includeInactive: true,
+            forceFull: false,
+          } as any);
+        } else {
+          console.log('❌ AUTO syncMenu: brandId is required');
+          return;
+        }
+
         if (cancelled) return;
+
         const fresh = await loadProductsFromSQLite(categoryId);
         if (!cancelled) {
           setProducts(fresh || []);
@@ -576,7 +645,7 @@ export default function ProductsScreen({
       cancelled = true;
       clearInterval(id);
     };
-  }, [online, categoryId]);
+  }, [online, categoryId, brandId]);
 
   /* ------------------------ POS CONFIG (VAT, payments, discounts) ------------------------ */
   useEffect(() => {
@@ -586,6 +655,7 @@ export default function ProductsScreen({
       try {
         const branchRaw = await AsyncStorage.getItem('pos_branch');
         let branchIdFromStorage: string | null = null;
+
         if (branchRaw) {
           try {
             const b = JSON.parse(branchRaw);
@@ -595,15 +665,9 @@ export default function ProductsScreen({
           }
         }
 
-        // fallback: use deviceInfo branchId if pos_branch not found
         if (!branchIdFromStorage) {
-          const rawDev = await AsyncStorage.getItem('deviceInfo');
-          if (rawDev) {
-            try {
-              const d = JSON.parse(rawDev);
-              branchIdFromStorage = d?.branchId ?? d?.branch?.id ?? null;
-            } catch { }
-          }
+          const dev = await readDeviceInfo();
+          branchIdFromStorage = dev.branchId;
         }
 
         if (mounted) setActiveBranchId(branchIdFromStorage);
@@ -619,6 +683,10 @@ export default function ProductsScreen({
           console.log('POS CONFIG returned error:', (cfg as any).error);
           return;
         }
+
+        // ✅ grab brandId from config too (your API returns it)
+        const cfgBrandId = (cfg as any)?.brandId;
+        if (cfgBrandId) setBrandId(String(cfgBrandId));
 
         const vat = (cfg as any)?.vatRate;
         const methods = (cfg as any)?.paymentMethods;
@@ -640,28 +708,18 @@ export default function ProductsScreen({
         if (Array.isArray(rawDiscounts)) {
           const mapped: DiscountConfig[] = rawDiscounts.map((d: any) => {
             const modeRaw = String(d.mode || d.type || 'AMOUNT').toUpperCase();
-            const mode: 'AMOUNT' | 'PERCENT' = modeRaw.includes('PERCENT')
-              ? 'PERCENT'
-              : 'AMOUNT';
+            const mode: 'AMOUNT' | 'PERCENT' = modeRaw.includes('PERCENT') ? 'PERCENT' : 'AMOUNT';
 
             const scopeRaw = d.scope || d.applyTo || 'ORDER';
-            const scope: 'ORDER' | 'ITEM' =
-              String(scopeRaw).toUpperCase() === 'ITEM' ? 'ITEM' : 'ORDER';
+            const scope: 'ORDER' | 'ITEM' = String(scopeRaw).toUpperCase() === 'ITEM' ? 'ITEM' : 'ORDER';
 
             const value = Number(d.value ?? d.amount ?? 0) || 0;
 
-            const branchIds: string[] = Array.isArray(d.branchIds)
-              ? d.branchIds.map((x: any) => String(x))
-              : [];
-
+            const branchIds: string[] = Array.isArray(d.branchIds) ? d.branchIds.map((x: any) => String(x)) : [];
             const categoryIds: string[] = Array.isArray(d.categoryIds)
               ? d.categoryIds.map((x: any) => String(x))
               : [];
-
-            const productIds: string[] = Array.isArray(d.productIds)
-              ? d.productIds.map((x: any) => String(x))
-              : [];
-
+            const productIds: string[] = Array.isArray(d.productIds) ? d.productIds.map((x: any) => String(x)) : [];
             const productSizeIds: string[] = Array.isArray(d.productSizeIds)
               ? d.productSizeIds.map((x: any) => String(x))
               : [];
@@ -669,12 +727,12 @@ export default function ProductsScreen({
             const orderTypesRaw: string[] =
               typeof d.orderTypes === 'string'
                 ? d.orderTypes
-                  .split(',')
-                  .map((s: any) => String(s).trim())
-                  .filter(Boolean)
+                    .split(',')
+                    .map((s: any) => String(s).trim())
+                    .filter(Boolean)
                 : Array.isArray(d.orderTypes)
-                  ? d.orderTypes.map((x: any) => String(x))
-                  : [];
+                ? d.orderTypes.map((x: any) => String(x))
+                : [];
 
             const orderTypes: string[] = orderTypesRaw
               .map((x) => normalizeOrderTypeLabel(x))
@@ -712,19 +770,80 @@ export default function ProductsScreen({
     };
   }, []);
 
+  /* ------------------------ Trice tag ------------------------ */
+  async function loadTiers() {
+    try {
+      setTierLoading(true);
+      const bid = await getEffectiveBrandId(brandId);
+      if (!bid) {
+        Alert.alert('Missing brand', 'brandId is missing. Please re-activate this POS device.');
+        return;
+      }
+      if (bid !== brandId) setBrandId(bid);
+  
+      const data = await get(`/pricing/tiers?brandId=${encodeURIComponent(bid)}`);
+      const list = Array.isArray(data) ? data : [];
+      setTiers(list);
+    } catch (e) {
+      console.log('loadTiers error (ProductsScreen)', e);
+      Alert.alert('Error', 'Failed to load price tiers.');
+    } finally {
+      setTierLoading(false);
+    }
+  }
+  
+  async function applyTier(tier: any | null) {
+    try {
+      const bid = await getEffectiveBrandId(brandId);
+      if (!bid) {
+        Alert.alert('Missing brand', 'brandId is missing. Please re-activate this POS device.');
+        return;
+      }
+      if (bid !== brandId) setBrandId(bid);
+  
+      if (tier) {
+        await AsyncStorage.setItem(
+          'pos_price_tier',
+          JSON.stringify({ id: tier.id, name: tier.name }),
+        );
+        setActiveTier({ id: tier.id, name: tier.name });
+      } else {
+        await AsyncStorage.removeItem('pos_price_tier');
+        setActiveTier(null);
+      }
+  
+      // refresh menu cache with the new tier
+      try {
+        await syncMenu({
+          brandId: bid,
+          includeInactive: true,
+          forceFull: true,
+        } as any);
+  
+        const fresh = await loadProductsFromSQLite(categoryId);
+        setProducts(fresh || []);
+        setFiltered(fresh || []);
+      } catch (err) {
+        console.log('syncMenu after tier change error (ProductsScreen)', err);
+      }
+  
+      setTierModalVisible(false);
+    } catch (e) {
+      console.log('applyTier error (ProductsScreen)', e);
+      Alert.alert('Error', 'Failed to apply price tier.');
+    }
+  }
+  
   /* ------------------------ SYNC ORDERS CACHE (for OrdersScreen offline) ------------------------ */
   async function syncOrdersCache() {
     try {
       let currentBranchId = branchId;
 
       if (!currentBranchId) {
-        const raw = await AsyncStorage.getItem('deviceInfo');
-        if (raw) {
-          const dev = JSON.parse(raw);
-          if (dev.branchId) {
-            currentBranchId = dev.branchId;
-            setBranchId(dev.branchId);
-          }
+        const dev = await readDeviceInfo();
+        if (dev.branchId) {
+          currentBranchId = dev.branchId;
+          setBranchId(dev.branchId);
         }
       }
 
@@ -757,12 +876,7 @@ export default function ProductsScreen({
           try {
             const parsed = JSON.parse(raw);
             if (typeof parsed === 'number') n = parsed;
-            else if (
-              parsed &&
-              typeof parsed === 'object' &&
-              typeof parsed.count === 'number'
-            )
-              n = parsed.count;
+            else if (parsed && typeof parsed === 'object' && typeof parsed.count === 'number') n = parsed.count;
             else n = Number(raw) || 0;
           } catch {
             n = Number(raw) || 0;
@@ -794,10 +908,7 @@ export default function ProductsScreen({
   }, [search, products]);
 
   /* ------------------------ DISCOUNT ELIGIBILITY ------------------------ */
-  function isDiscountEligibleForCart(
-    discount: DiscountConfig,
-    cartItems: CartItem[],
-  ): boolean {
+  function isDiscountEligibleForCart(discount: DiscountConfig, cartItems: CartItem[]): boolean {
     const productIds = discount.productIds || [];
     const categoryIds = discount.categoryIds || [];
     const productSizeIds = discount.productSizeIds || [];
@@ -818,18 +929,12 @@ export default function ProductsScreen({
       }
     }
 
-    const hasAssignments =
-      productIds.length > 0 ||
-      categoryIds.length > 0 ||
-      productSizeIds.length > 0;
-
+    const hasAssignments = productIds.length > 0 || categoryIds.length > 0 || productSizeIds.length > 0;
     if (!hasAssignments) return false;
     if (!cartItems.length) return false;
 
     const cartProductIds = new Set(cartItems.map((c) => c.productId));
-    const cartSizeIds = new Set(
-      cartItems.map((c) => c.sizeId).filter((id): id is string => !!id),
-    );
+    const cartSizeIds = new Set(cartItems.map((c) => c.sizeId).filter((id): id is string => !!id));
 
     const productById = new Map<string, Product>();
     products.forEach((p) => productById.set(p.id, p));
@@ -840,26 +945,16 @@ export default function ProductsScreen({
       if (p?.categoryId) cartCategoryIds.add(p.categoryId);
     });
 
-    const productMatch =
-      productIds.length > 0 &&
-      productIds.some((pid) => cartProductIds.has(pid));
+    const productMatch = productIds.length > 0 && productIds.some((pid) => cartProductIds.has(pid));
     const categoryMatch =
-      categoryIds.length > 0 &&
-      Array.from(cartCategoryIds).some((cid) => categoryIds.includes(cid));
-    const sizeMatch =
-      productSizeIds.length > 0 &&
-      productSizeIds.some((sid) => cartSizeIds.has(sid));
+      categoryIds.length > 0 && Array.from(cartCategoryIds).some((cid) => categoryIds.includes(cid));
+    const sizeMatch = productSizeIds.length > 0 && productSizeIds.some((sid) => cartSizeIds.has(sid));
 
     return productMatch || categoryMatch || sizeMatch;
   }
 
   const applicableDiscounts: DiscountConfig[] = useMemo(() => {
-    return discountConfigs.filter((d) =>
-      isDiscountEligibleForCart(
-        d,
-        Array.isArray(cart) ? (cart as CartItem[]) : [],
-      ),
-    );
+    return discountConfigs.filter((d) => isDiscountEligibleForCart(d, Array.isArray(cart) ? (cart as CartItem[]) : []));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [discountConfigs, cart, orderType, activeBranchId, products]);
 
@@ -877,9 +972,7 @@ export default function ProductsScreen({
 
     setCart((prev: CartItem[]) => {
       const sizeId = size ? size.id : null;
-      const idx = prev.findIndex(
-        (it) => it.productId === product.id && it.sizeId === sizeId,
-      );
+      const idx = prev.findIndex((it) => it.productId === product.id && it.sizeId === sizeId);
       if (idx !== -1) {
         const copy = [...prev];
         copy[idx] = { ...copy[idx], qty: copy[idx].qty + 1 };
@@ -906,9 +999,7 @@ export default function ProductsScreen({
     if (readOnlyCart) return;
     setCart((prev: CartItem[]) => {
       const items = [...prev];
-      const idx = items.findIndex(
-        (it) => it.productId === productId && it.sizeId === sizeId,
-      );
+      const idx = items.findIndex((it) => it.productId === productId && it.sizeId === sizeId);
       if (idx === -1) return items;
 
       const newQty = items[idx].qty + delta;
@@ -919,9 +1010,7 @@ export default function ProductsScreen({
   }
 
   function getCartQty(productId: string, sizeId: string | null) {
-    const item: CartItem | undefined = (cart as CartItem[]).find(
-      (it) => it.productId === productId && it.sizeId === sizeId,
-    );
+    const item: CartItem | undefined = (cart as CartItem[]).find((it) => it.productId === productId && it.sizeId === sizeId);
     return item?.qty ?? 0;
   }
 
@@ -960,9 +1049,7 @@ export default function ProductsScreen({
   async function fetchCustomers(term: string) {
     try {
       setCustomerLoading(true);
-      const qs = term
-        ? `/pos/customers?search=${encodeURIComponent(term)}`
-        : '/pos/customers';
+      const qs = term ? `/pos/customers?search=${encodeURIComponent(term)}` : '/pos/customers';
       const data = await get(qs);
       const arr = Array.isArray(data) ? data : [];
       setCustomerList(
@@ -1020,10 +1107,7 @@ export default function ProductsScreen({
       console.log('CREATE CUSTOMER ERROR', err);
       const msg = String(err?.message || err);
       if (msg.includes('Customer already exists')) {
-        Alert.alert(
-          'Customer already exists',
-          'A customer with this phone already exists.',
-        );
+        Alert.alert('Customer already exists', 'A customer with this phone already exists.');
       } else {
         Alert.alert('Error', 'Failed to create customer.');
       }
@@ -1057,10 +1141,7 @@ export default function ProductsScreen({
 
   function openDiscountInput(mode: 'AMOUNT' | 'PERCENT') {
     if (!canUseOpenDiscount) {
-      Alert.alert(
-        'No permission',
-        'You are not allowed to apply open/manual discounts.',
-      );
+      Alert.alert('No permission', 'You are not allowed to apply open/manual discounts.');
       return;
     }
 
@@ -1072,10 +1153,7 @@ export default function ProductsScreen({
 
   function applyDiscountInput() {
     if (!canUseOpenDiscount) {
-      Alert.alert(
-        'No permission',
-        'You are not allowed to apply open/manual discounts.',
-      );
+      Alert.alert('No permission', 'You are not allowed to apply open/manual discounts.');
       setDiscountInputModalVisible(false);
       return;
     }
@@ -1099,10 +1177,7 @@ export default function ProductsScreen({
     if (readOnlyCart) return;
 
     if (!canUsePredefinedDiscount) {
-      Alert.alert(
-        'No permission',
-        'You are not allowed to apply predefined discounts.',
-      );
+      Alert.alert('No permission', 'You are not allowed to apply predefined discounts.');
       return;
     }
 
@@ -1115,10 +1190,7 @@ export default function ProductsScreen({
     }
 
     if (!applicableDiscounts.length) {
-      Alert.alert(
-        'No discounts',
-        'No predefined discounts are applicable for this branch/cart.',
-      );
+      Alert.alert('No discounts', 'No predefined discounts are applicable for this branch/cart.');
       return;
     }
 
@@ -1128,10 +1200,7 @@ export default function ProductsScreen({
   function applyPredefinedDiscount(cfg: DiscountConfig) {
     const cartItems: CartItem[] = Array.isArray(cart) ? cart : [];
     if (!isDiscountEligibleForCart(cfg, cartItems)) {
-      Alert.alert(
-        'Not applicable',
-        'This discount is not allowed for current items or order type.',
-      );
+      Alert.alert('Not applicable', 'This discount is not allowed for current items or order type.');
       return;
     }
 
@@ -1151,10 +1220,7 @@ export default function ProductsScreen({
   }
 
   /* ------------------------ TOTALS ------------------------ */
-  const grossTotal: number = (cart as CartItem[]).reduce(
-    (sum, it) => sum + calcLineTotal(it),
-    0
-  );
+  const grossTotal: number = (cart as CartItem[]).reduce((sum, it) => sum + calcLineTotal(it), 0);
 
   let discountAmount = 0;
   if (appliedDiscount && grossTotal > 0) {
@@ -1169,8 +1235,7 @@ export default function ProductsScreen({
   const netTotal = grossTotal - discountAmount;
 
   const vatFraction = vatRate > 0 ? vatRate / 100 : 0;
-  const subtotalEx =
-    netTotal > 0 && vatFraction > 0 ? netTotal / (1 + vatFraction) : netTotal;
+  const subtotalEx = netTotal > 0 && vatFraction > 0 ? netTotal / (1 + vatFraction) : netTotal;
   const vatAmount = netTotal - subtotalEx;
 
   const totalPaid = payments.reduce((s, p) => s + p.amount, 0);
@@ -1179,10 +1244,7 @@ export default function ProductsScreen({
   const changeAmount = totalPaid > netTotal ? totalPaid - netTotal : 0;
 
   /* ------------------------ PAYMENT DERIVED ------------------------ */
-  const selectedMethod = paymentMethods.find(
-    (m) => m.id === selectedPaymentMethodId
-  );
-
+  const selectedMethod = paymentMethods.find((m) => m.id === selectedPaymentMethodId);
   const quickAmounts = [remaining, 50, 100].filter((x) => x > 0.01);
 
   const groupedPayments = payments.reduce(
@@ -1191,7 +1253,7 @@ export default function ProductsScreen({
       acc[p.methodId].amount += p.amount;
       return acc;
     },
-    {} as Record<string, { methodName: string; amount: number }>
+    {} as Record<string, { methodName: string; amount: number }>,
   );
   const groupedPaymentsArray = Object.values(groupedPayments);
 
@@ -1248,14 +1310,13 @@ export default function ProductsScreen({
     ]);
   }
 
-
   /* ------------------------ REQUIRED IDS GUARD ------------------------ */
-  function ensureBrandAndDevice(): boolean {
-    if (!brandId || !deviceId) {
-      Alert.alert(
-        'Device not activated',
-        'Missing brandId/deviceId. Please re-activate this POS device.',
-      );
+  async function ensureBrandAndDevice(): Promise<boolean> {
+    const bid = await getEffectiveBrandId(brandId);
+    if (bid && bid !== brandId) setBrandId(bid);
+
+    if (!bid || !deviceId) {
+      Alert.alert('Device not activated', 'Missing brandId/deviceId. Please re-activate this POS device.');
       return false;
     }
     return true;
@@ -1267,26 +1328,28 @@ export default function ProductsScreen({
     if (netTotal <= 0) return;
     if (remaining > 0.01) return;
     if (!payments.length) return;
-    if (!ensureBrandAndDevice()) return;
+
+    if (!(await ensureBrandAndDevice())) return;
+    const bid = await getEffectiveBrandId(brandId);
+    if (!bid) return;
 
     try {
       setPaying(true);
 
       const discountPayload = appliedDiscount
         ? {
-          kind: appliedDiscount.kind,
-          value: appliedDiscount.value,
-          amount: discountAmount,
-          source: appliedDiscount.source,
-          name: appliedDiscount.name ?? null,
-          configId: appliedDiscount.id ?? null,
-          scope: appliedDiscount.scope ?? null,
-        }
+            kind: appliedDiscount.kind,
+            value: appliedDiscount.value,
+            amount: discountAmount,
+            source: appliedDiscount.source,
+            name: appliedDiscount.name ?? null,
+            configId: appliedDiscount.id ?? null,
+            scope: appliedDiscount.scope ?? null,
+          }
         : null;
 
       const basePayload: any = {
-        // ✅ REQUIRED FOR API
-        brandId,
+        brandId: bid,
         deviceId,
 
         vatRate,
@@ -1306,18 +1369,16 @@ export default function ProductsScreen({
           modifiers:
             i.modifiers && i.modifiers.length > 0
               ? i.modifiers.map((m) => ({
-                modifierItemId: m.itemId,
-                price: m.price,
-                qty: 1,
-              }))
+                  modifierItemId: m.itemId,
+                  price: m.price,
+                  qty: 1,
+                }))
               : [],
         })),
         payments,
       };
 
-      if (selectedCustomer?.id) {
-        basePayload.customerId = String(selectedCustomer.id);
-      }
+      if (selectedCustomer?.id) basePayload.customerId = String(selectedCustomer.id);
 
       if (activeOrderId) {
         await post(`/orders/${activeOrderId}/close`, basePayload);
@@ -1369,24 +1430,25 @@ export default function ProductsScreen({
       return;
     }
 
-    if (!ensureBrandAndDevice()) return;
+    if (!(await ensureBrandAndDevice())) return;
+    const bid = await getEffectiveBrandId(brandId);
+    if (!bid) return;
 
     try {
       const discountPayload = appliedDiscount
         ? {
-          kind: appliedDiscount.kind,
-          value: appliedDiscount.value,
-          amount: discountAmount,
-          source: appliedDiscount.source,
-          name: appliedDiscount.name ?? null,
-          configId: appliedDiscount.id ?? null,
-          scope: appliedDiscount.scope ?? null,
-        }
+            kind: appliedDiscount.kind,
+            value: appliedDiscount.value,
+            amount: discountAmount,
+            source: appliedDiscount.source,
+            name: appliedDiscount.name ?? null,
+            configId: appliedDiscount.id ?? null,
+            scope: appliedDiscount.scope ?? null,
+          }
         : null;
 
       const payload: any = {
-        // ✅ REQUIRED FOR API
-        brandId,
+        brandId: bid,
         deviceId,
 
         branchName,
@@ -1409,18 +1471,16 @@ export default function ProductsScreen({
           modifiers:
             i.modifiers && i.modifiers.length > 0
               ? i.modifiers.map((m) => ({
-                modifierItemId: m.itemId,
-                price: m.price,
-                qty: 1,
-              }))
+                  modifierItemId: m.itemId,
+                  price: m.price,
+                  qty: 1,
+                }))
               : [],
         })),
         payments: [],
       };
 
-      if (selectedCustomer?.id) {
-        payload.customerId = String(selectedCustomer.id);
-      }
+      if (selectedCustomer?.id) payload.customerId = String(selectedCustomer.id);
 
       await post('/pos/orders', payload);
 
@@ -1442,31 +1502,34 @@ export default function ProductsScreen({
     const cartItems: CartItem[] = Array.isArray(cart) ? cart : [];
     if (!cartItems.length) return;
 
-    if (!ensureBrandAndDevice()) return;
-
     Alert.alert('Void order', 'Are you sure you want to void this order?', [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Void',
         style: 'destructive',
         onPress: async () => {
+          const ok = await ensureBrandAndDevice();
+          if (!ok) return;
+          const bid = await getEffectiveBrandId(brandId);
+          if (!bid) return;
+
           try {
             setVoidLoading(true);
 
             const discountPayload = appliedDiscount
               ? {
-                kind: appliedDiscount.kind,
-                value: appliedDiscount.value,
-                amount: discountAmount,
-                source: appliedDiscount.source,
-                name: appliedDiscount.name ?? null,
-                configId: appliedDiscount.id ?? null,
-                scope: appliedDiscount.scope ?? null,
-              }
+                  kind: appliedDiscount.kind,
+                  value: appliedDiscount.value,
+                  amount: discountAmount,
+                  source: appliedDiscount.source,
+                  name: appliedDiscount.name ?? null,
+                  configId: appliedDiscount.id ?? null,
+                  scope: appliedDiscount.scope ?? null,
+                }
               : null;
 
             const payload: any = {
-              brandId,
+              brandId: bid,
               deviceId,
 
               branchName,
@@ -1489,18 +1552,16 @@ export default function ProductsScreen({
                 modifiers:
                   i.modifiers && i.modifiers.length > 0
                     ? i.modifiers.map((m) => ({
-                      modifierItemId: m.itemId,
-                      price: m.price,
-                      qty: 1,
-                    }))
+                        modifierItemId: m.itemId,
+                        price: m.price,
+                        qty: 1,
+                      }))
                     : [],
               })),
               payments: [],
             };
 
-            if (selectedCustomer?.id) {
-              payload.customerId = String(selectedCustomer.id);
-            }
+            if (selectedCustomer?.id) payload.customerId = String(selectedCustomer.id);
 
             await post('/pos/orders', payload);
 
@@ -1523,8 +1584,7 @@ export default function ProductsScreen({
     ]);
   }
 
-  const payDisabled =
-    paying || netTotal <= 0 || remaining > 0.01 || payments.length === 0;
+  const payDisabled = paying || netTotal <= 0 || remaining > 0.01 || payments.length === 0;
 
   type ActionButton = {
     label: string;
@@ -1534,6 +1594,15 @@ export default function ProductsScreen({
   };
 
   const actions: ActionButton[] = [
+    {
+      label: 'Price Tag',
+      visible: true,
+      onPress: () => {
+        if (readOnlyCart) return;
+        setTierModalVisible(true);
+        loadTiers();
+      },
+    },
     { label: 'Print', onPress: () => console.log('PRINT'), visible: true },
     { label: 'Kitchen', onPress: () => console.log('KITCHEN'), visible: true },
     {
@@ -1562,9 +1631,7 @@ export default function ProductsScreen({
       {/* Top bar */}
       <View style={styles.topBar}>
         <View>
-          <Text style={styles.topSub}>
-            Brand: {brandName || brandCode || '-'}
-          </Text>
+          <Text style={styles.topSub}>Brand: {brandName || brandCode || '-'}</Text>
           <Text style={styles.topSub}>Branch: {branchName || '-'}</Text>
           <Text style={styles.topSub}>User: {userName || '-'}</Text>
         </View>
@@ -1590,9 +1657,7 @@ export default function ProductsScreen({
               style={[styles.orderTypeTag, readOnlyCart && { opacity: 0.5 }]}
               disabled={readOnlyCart}
             >
-              <Text style={styles.orderTypeText}>
-                {orderType || 'SELECT ORDER TYPE'}
-              </Text>
+              <Text style={styles.orderTypeText}>{orderType || 'SELECT ORDER TYPE'}</Text>
             </Pressable>
           </View>
 
@@ -1600,9 +1665,7 @@ export default function ProductsScreen({
 
           <ScrollView style={styles.orderList}>
             {(cart as CartItem[]).map((item, idx) => {
-              const unitWithMods =
-                normalizePrice(item.price) +
-                calcLineModifierTotal(item.modifiers);
+              const unitWithMods = normalizePrice(item.price) + calcLineModifierTotal(item.modifiers);
 
               return (
                 <View key={idx.toString()} style={styles.orderRow}>
@@ -1620,12 +1683,8 @@ export default function ProductsScreen({
                   >
                     <View style={styles.orderLineTop}>
                       <Text style={styles.orderItemName}>{item.productName}</Text>
-                      <Text style={styles.orderItemSize}>
-                        {item.sizeName || ''}
-                      </Text>
-                      <Text style={styles.orderItemPriceRight}>
-                        {toMoney(unitWithMods)}
-                      </Text>
+                      <Text style={styles.orderItemSize}>{item.sizeName || ''}</Text>
+                      <Text style={styles.orderItemPriceRight}>{toMoney(unitWithMods)}</Text>
                     </View>
 
                     {item.modifiers && item.modifiers.length > 0 && (
@@ -1643,19 +1702,13 @@ export default function ProductsScreen({
                     </View>
                   ) : (
                     <View style={styles.qtyBox}>
-                      <Pressable
-                        style={styles.qtyTapLeft}
-                        onPress={() => onChangeQtyInCart(idx, -1)}
-                      >
+                      <Pressable style={styles.qtyTapLeft} onPress={() => onChangeQtyInCart(idx, -1)}>
                         <Text style={styles.qtyText}>-</Text>
                       </Pressable>
                       <View style={styles.qtyMid}>
                         <Text style={styles.qtyValue}>{item.qty}</Text>
                       </View>
-                      <Pressable
-                        style={styles.qtyTapRight}
-                        onPress={() => onChangeQtyInCart(idx, +1)}
-                      >
+                      <Pressable style={styles.qtyTapRight} onPress={() => onChangeQtyInCart(idx, +1)}>
                         <Text style={styles.qtyText}>+</Text>
                       </Pressable>
                     </View>
@@ -1674,30 +1727,24 @@ export default function ProductsScreen({
               </View>
 
               <View style={styles.summaryRow}>
-                <Text style={styles.summaryLabel}>
-                  VAT ({vatRate.toFixed(2)}%)
-                </Text>
+                <Text style={styles.summaryLabel}>VAT ({vatRate.toFixed(2)}%)</Text>
                 <Text style={styles.summaryValue}>{toMoney(vatAmount)}</Text>
               </View>
 
               <View style={styles.summaryRow}>
                 <Text style={styles.summaryLabel}>
                   Discount
-                  {appliedDiscount?.source === 'PREDEFINED' &&
-                    appliedDiscount.name
+                  {appliedDiscount?.source === 'PREDEFINED' && appliedDiscount.name
                     ? ` (${appliedDiscount.name})`
                     : appliedDiscount?.kind === 'PERCENT'
-                      ? ` (${appliedDiscount.value.toFixed(2)}%)`
-                      : ''}
+                    ? ` (${appliedDiscount.value.toFixed(2)}%)`
+                    : ''}
                 </Text>
                 <Text style={styles.summaryValue}>-{toMoney(discountAmount)}</Text>
               </View>
 
               {appliedDiscount && (
-                <Pressable
-                  onPress={() => setAppliedDiscount(null)}
-                  style={{ alignSelf: 'flex-end', marginBottom: 2 }}
-                >
+                <Pressable onPress={() => setAppliedDiscount(null)} style={{ alignSelf: 'flex-end', marginBottom: 2 }}>
                   <Text style={styles.discountClearText}>Remove discount</Text>
                 </Pressable>
               )}
@@ -1706,19 +1753,13 @@ export default function ProductsScreen({
                 <View style={styles.paymentsSummaryBox}>
                   {groupedPaymentsArray.map((p) => (
                     <View key={p.methodName} style={styles.paymentSummaryRow}>
-                      <Text style={styles.paymentSummaryLabel}>
-                        {p.methodName}
-                      </Text>
-                      <Text style={styles.paymentSummaryValue}>
-                        {toMoney(p.amount)}
-                      </Text>
+                      <Text style={styles.paymentSummaryLabel}>{p.methodName}</Text>
+                      <Text style={styles.paymentSummaryValue}>{toMoney(p.amount)}</Text>
                     </View>
                   ))}
                   <View style={styles.paymentSummaryTotalRow}>
                     <Text style={styles.paymentSummaryTotalLabel}>Paid</Text>
-                    <Text style={styles.paymentSummaryTotalValue}>
-                      {toMoney(totalPaid)}
-                    </Text>
+                    <Text style={styles.paymentSummaryTotalValue}>{toMoney(totalPaid)}</Text>
                   </View>
                 </View>
               )}
@@ -1750,11 +1791,7 @@ export default function ProductsScreen({
                     onPress={action.onPress}
                     disabled={!!disabled}
                   >
-                    <Text style={styles.actionText}>
-                      {isVoid && action.loading
-                        ? 'VOID…'
-                        : action.label.toUpperCase()}
-                    </Text>
+                    <Text style={styles.actionText}>{isVoid && action.loading ? 'VOID…' : action.label.toUpperCase()}</Text>
                   </Pressable>
                 );
               })}
@@ -1786,18 +1823,9 @@ export default function ProductsScreen({
           )}
 
           {!loading && !error && (
-            <ScrollView
-              contentContainerStyle={styles.productsGrid}
-              showsVerticalScrollIndicator={false}
-            >
+            <ScrollView contentContainerStyle={styles.productsGrid} showsVerticalScrollIndicator={false}>
               {/* Back tile */}
-              <Pressable
-                style={({ pressed }) => [
-                  styles.productTile,
-                  pressed && { opacity: 0.8 },
-                ]}
-                onPress={handleBack}
-              >
+              <Pressable style={({ pressed }) => [styles.productTile, pressed && { opacity: 0.8 }]} onPress={handleBack}>
                 <View style={styles.productImageWrap}>
                   <Text style={styles.backText}>← BACK</Text>
                 </View>
@@ -1826,17 +1854,25 @@ export default function ProductsScreen({
                       disabled={readOnlyCart}
                     >
                       <View style={styles.productImageWrap}>
-                        {p.imageUrl ? (
-                          <Image
-                            source={{ uri: p.imageUrl }}
-                            style={styles.productImage}
-                          />
-                        ) : (
-                          <View style={styles.productImagePlaceholder}>
-                            <Text style={styles.productPlaceholderText}>IMG</Text>
-                          </View>
-                        )}
+                        {(() => {
+                          const img = normalizeImageUrl(p.imageUrl);
+                          return img ? (
+                            <Image
+                              source={{ uri: img }}
+                              style={styles.productImage}
+                              resizeMode="cover"
+                              onError={(e) => {
+                                console.log('❌ Product image failed:', img, e?.nativeEvent);
+                              }}
+                            />
+                          ) : (
+                            <View style={styles.productImagePlaceholder}>
+                              <Text style={styles.productPlaceholderText}>IMG</Text>
+                            </View>
+                          );
+                        })()}
                       </View>
+
                       <Text style={styles.productName} numberOfLines={2}>
                         {p.name}
                       </Text>
@@ -1844,19 +1880,13 @@ export default function ProductsScreen({
 
                     {!hasSizes && !readOnlyCart && (
                       <View style={styles.productQtyBar}>
-                        <Pressable
-                          style={styles.qtyTapSmall}
-                          onPress={() => changeCartQty(p.id, null, -1)}
-                        >
+                        <Pressable style={styles.qtyTapSmall} onPress={() => changeCartQty(p.id, null, -1)}>
                           <Text style={styles.qtyText}>-</Text>
                         </Pressable>
                         <View style={styles.qtyMidSmall}>
                           <Text style={styles.qtyValue}>{qtyNoSize}</Text>
                         </View>
-                        <Pressable
-                          style={styles.qtyTapSmall}
-                          onPress={() => changeCartQty(p.id, null, +1)}
-                        >
+                        <Pressable style={styles.qtyTapSmall} onPress={() => changeCartQty(p.id, null, +1)}>
                           <Text style={styles.qtyText}>+</Text>
                         </Pressable>
                       </View>
@@ -1890,10 +1920,7 @@ export default function ProductsScreen({
         )}
 
         <Pressable
-          style={[
-            styles.payButton,
-            (readOnlyCart || payDisabled) && styles.payButtonDisabled,
-          ]}
+          style={[styles.payButton, (readOnlyCart || payDisabled) && styles.payButtonDisabled]}
           onPress={handlePay}
           disabled={readOnlyCart || payDisabled}
         >
@@ -1903,25 +1930,17 @@ export default function ProductsScreen({
 
       {/* Bottom nav bar */}
       <View style={styles.bottomBar}>
-        <Pressable
-          style={styles.bottomItem}
-          onPress={() => navigation.navigate('Home')}
-        >
+        <Pressable style={styles.bottomItem} onPress={() => navigation.navigate('Home')}>
           <Text style={styles.bottomIcon}>🏠</Text>
           <Text style={styles.bottomLabel}>HOME</Text>
         </Pressable>
 
-        <Pressable
-          style={styles.bottomItem}
-          onPress={() => navigation.navigate('Orders')}
-        >
+        <Pressable style={styles.bottomItem} onPress={() => navigation.navigate('Orders')}>
           <Text style={styles.bottomIcon}>🧾</Text>
           <Text style={styles.bottomLabel}>ORDERS</Text>
 
           <View style={styles.bottomBadge}>
-            <Text style={styles.bottomBadgeText}>
-              {ordersBadge > 99 ? '99+' : ordersBadge}
-            </Text>
+            <Text style={styles.bottomBadgeText}>{ordersBadge > 99 ? '99+' : ordersBadge}</Text>
           </View>
         </Pressable>
 
@@ -1930,11 +1949,7 @@ export default function ProductsScreen({
           <Text style={styles.bottomLabel}>TABLES</Text>
         </Pressable>
 
-        <Pressable
-          style={styles.bottomItem}
-          onPress={handleNewOrder}
-          disabled={readOnlyCart}
-        >
+        <Pressable style={styles.bottomItem} onPress={handleNewOrder} disabled={readOnlyCart}>
           <Text style={styles.bottomIcon}>＋</Text>
           <Text style={styles.bottomLabel}>NEW</Text>
         </Pressable>
@@ -1959,9 +1974,7 @@ export default function ProductsScreen({
                   <View key={s.id} style={styles.sizeRow}>
                     <Pressable
                       style={styles.sizeLeft}
-                      onPress={() =>
-                        changeCartQty(selectedProduct.id, s.id, -1)
-                      }
+                      onPress={() => changeCartQty(selectedProduct.id, s.id, -1)}
                       disabled={readOnlyCart}
                     >
                       <Text style={styles.sizeName}>{s.name}</Text>
@@ -2046,7 +2059,7 @@ export default function ProductsScreen({
         </View>
       </Modal>
 
-      {/* ------------------------ PAYMENT MODAL (CategoryScreen style) ------------------------ */}
+      {/* ------------------------ PAYMENT MODAL ------------------------ */}
       <Modal
         visible={paymentModalVisible}
         transparent
@@ -2063,10 +2076,7 @@ export default function ProductsScreen({
                 {paymentMethods.map((m) => (
                   <Pressable
                     key={m.id}
-                    style={({ pressed }) => [
-                      styles.paymentMethodRow,
-                      pressed && { opacity: 0.85 },
-                    ]}
+                    style={({ pressed }) => [styles.paymentMethodRow, pressed && { opacity: 0.85 }]}
                     onPress={() => {
                       setSelectedPaymentMethodId(m.id);
                       setShowCustomAmount(false);
@@ -2074,37 +2084,27 @@ export default function ProductsScreen({
                     }}
                     disabled={readOnlyCart}
                   >
-                    <Text style={styles.paymentMethodText}>
-                      {m.name}
-                    </Text>
+                    <Text style={styles.paymentMethodText}>{m.name}</Text>
                   </Pressable>
                 ))}
               </ScrollView>
 
-              <Pressable
-                style={[styles.modalClose, { marginTop: 16 }]}
-                onPress={() => setPaymentModalVisible(false)}
-              >
+              <Pressable style={[styles.modalClose, { marginTop: 16 }]} onPress={() => setPaymentModalVisible(false)}>
                 <Text style={styles.modalCloseText}>Close</Text>
               </Pressable>
             </View>
           ) : (
-            // STEP 2: Amounts (CategoryScreen list style)
+            // STEP 2: Amounts
             <View style={styles.amountCard}>
               <View style={styles.amountHeaderRow}>
                 <Text style={styles.amountTitle}>{selectedMethod?.name || 'Payment'}</Text>
-                <Text style={styles.amountRemaining}>
-                  Remaining: {toMoney(remaining)}
-                </Text>
+                <Text style={styles.amountRemaining}>Remaining: {toMoney(remaining)}</Text>
               </View>
 
               {quickAmounts.map((amt, idx) => (
                 <Pressable
                   key={`${amt}-${idx}`}
-                  style={({ pressed }) => [
-                    styles.amountListRow,
-                    pressed && styles.amountListRowPressed,
-                  ]}
+                  style={({ pressed }) => [styles.amountListRow, pressed && styles.amountListRowPressed]}
                   onPress={() => completePayment(amt)}
                   disabled={readOnlyCart}
                 >
@@ -2113,10 +2113,7 @@ export default function ProductsScreen({
               ))}
 
               <Pressable
-                style={({ pressed }) => [
-                  styles.amountListRow,
-                  pressed && styles.amountListRowPressed,
-                ]}
+                style={({ pressed }) => [styles.amountListRow, pressed && styles.amountListRowPressed]}
                 onPress={() => setShowCustomAmount(true)}
                 disabled={readOnlyCart}
               >
@@ -2159,18 +2156,12 @@ export default function ProductsScreen({
                 <Text style={styles.cancelText}>CANCEL</Text>
               </Pressable>
             </View>
-
           )}
         </View>
       </Modal>
 
       {/* CUSTOMERS MODAL */}
-      <Modal
-        visible={customerModalVisible}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setCustomerModalVisible(false)}
-      >
+      <Modal visible={customerModalVisible} transparent animationType="fade" onRequestClose={() => setCustomerModalVisible(false)}>
         <View style={styles.modalOverlay}>
           <View style={styles.customerCard}>
             <Text style={styles.modalTitle}>Select customer</Text>
@@ -2183,10 +2174,7 @@ export default function ProductsScreen({
                 value={customerSearch}
                 onChangeText={setCustomerSearch}
               />
-              <Pressable
-                style={styles.customerSearchButton}
-                onPress={() => fetchCustomers(customerSearch)}
-              >
+              <Pressable style={styles.customerSearchButton} onPress={() => fetchCustomers(customerSearch)}>
                 <Text style={styles.customerSearchButtonText}>Search</Text>
               </Pressable>
             </View>
@@ -2200,11 +2188,7 @@ export default function ProductsScreen({
 
               {!customerLoading &&
                 customerList.map((c) => (
-                  <Pressable
-                    key={c.id}
-                    style={styles.customerRow}
-                    onPress={() => handleSelectCustomer(c)}
-                  >
+                  <Pressable key={c.id} style={styles.customerRow} onPress={() => handleSelectCustomer(c)}>
                     <Text style={styles.customerName}>{c.name}</Text>
                     {!!c.phone && <Text style={styles.customerPhone}>{c.phone}</Text>}
                   </Pressable>
@@ -2237,31 +2221,19 @@ export default function ProductsScreen({
                 onPress={handleCreateCustomer}
                 disabled={savingCustomer}
               >
-                <Text style={styles.customerSaveText}>
-                  {savingCustomer ? 'SAVING…' : 'SAVE'}
-                </Text>
+                <Text style={styles.customerSaveText}>{savingCustomer ? 'SAVING…' : 'SAVE'}</Text>
               </Pressable>
             </View>
 
-            <Pressable
-              style={[styles.modalClose, { marginTop: 12 }]}
-              onPress={() => setCustomerModalVisible(false)}
-            >
+            <Pressable style={[styles.modalClose, { marginTop: 12 }]} onPress={() => setCustomerModalVisible(false)}>
               <Text style={styles.modalCloseText}>Close</Text>
             </Pressable>
           </View>
         </View>
       </Modal>
 
-
-
       {/* ------------------------ DISCOUNT MODE MODAL ------------------------ */}
-      <Modal
-        visible={discountModeModalVisible}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setDiscountModeModalVisible(false)}
-      >
+      <Modal visible={discountModeModalVisible} transparent animationType="fade" onRequestClose={() => setDiscountModeModalVisible(false)}>
         <View style={styles.modalOverlay}>
           <View style={[styles.modalCard, { width: '35%' }]}>
             <Text style={styles.modalTitle}>Discount</Text>
@@ -2279,9 +2251,7 @@ export default function ProductsScreen({
                   alignItems: 'center',
                 }}
               >
-                <Text style={{ color: '#fff', fontWeight: '800' }}>
-                  OPEN AMOUNT
-                </Text>
+                <Text style={{ color: '#fff', fontWeight: '800' }}>OPEN AMOUNT</Text>
               </Pressable>
 
               <Pressable
@@ -2295,9 +2265,7 @@ export default function ProductsScreen({
                   alignItems: 'center',
                 }}
               >
-                <Text style={{ color: '#fff', fontWeight: '800' }}>
-                  OPEN PERCENT
-                </Text>
+                <Text style={{ color: '#fff', fontWeight: '800' }}>OPEN PERCENT</Text>
               </Pressable>
 
               <Pressable
@@ -2307,15 +2275,11 @@ export default function ProductsScreen({
                   paddingVertical: 12,
                   paddingHorizontal: 12,
                   borderRadius: 12,
-                  backgroundColor: canUsePredefinedDiscount
-                    ? '#111827'
-                    : '#9ca3af',
+                  backgroundColor: canUsePredefinedDiscount ? '#111827' : '#9ca3af',
                   alignItems: 'center',
                 }}
               >
-                <Text style={{ color: '#fff', fontWeight: '800' }}>
-                  PREDEFINED
-                </Text>
+                <Text style={{ color: '#fff', fontWeight: '800' }}>PREDEFINED</Text>
               </Pressable>
 
               {appliedDiscount && (
@@ -2333,17 +2297,12 @@ export default function ProductsScreen({
                     alignItems: 'center',
                   }}
                 >
-                  <Text style={{ color: '#fff', fontWeight: '800' }}>
-                    REMOVE DISCOUNT
-                  </Text>
+                  <Text style={{ color: '#fff', fontWeight: '800' }}>REMOVE DISCOUNT</Text>
                 </Pressable>
               )}
             </View>
 
-            <Pressable
-              style={[styles.modalClose, { backgroundColor: '#374151' }]}
-              onPress={() => setDiscountModeModalVisible(false)}
-            >
+            <Pressable style={[styles.modalClose, { backgroundColor: '#374151' }]} onPress={() => setDiscountModeModalVisible(false)}>
               <Text style={styles.modalCloseText}>Close</Text>
             </Pressable>
           </View>
@@ -2351,22 +2310,13 @@ export default function ProductsScreen({
       </Modal>
 
       {/* ------------------------ DISCOUNT INPUT MODAL ------------------------ */}
-      <Modal
-        visible={discountInputModalVisible}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setDiscountInputModalVisible(false)}
-      >
+      <Modal visible={discountInputModalVisible} transparent animationType="fade" onRequestClose={() => setDiscountInputModalVisible(false)}>
         <View style={styles.modalOverlay}>
           <View style={[styles.modalCard, { width: '35%' }]}>
             <Text style={styles.modalTitle}>
-              {discountInputMode === 'PERCENT'
-                ? 'Discount Percent'
-                : 'Discount Amount'}
+              {discountInputMode === 'PERCENT' ? 'Discount Percent' : 'Discount Amount'}
             </Text>
-            <Text style={styles.modalSub}>
-              Enter {discountInputMode === 'PERCENT' ? '%' : 'amount'} value
-            </Text>
+            <Text style={styles.modalSub}>Enter {discountInputMode === 'PERCENT' ? '%' : 'amount'} value</Text>
 
             <TextInput
               value={discountInputValue}
@@ -2401,10 +2351,7 @@ export default function ProductsScreen({
               <Text style={{ color: '#fff', fontWeight: '800' }}>APPLY</Text>
             </Pressable>
 
-            <Pressable
-              style={[styles.modalClose, { backgroundColor: '#374151' }]}
-              onPress={() => setDiscountInputModalVisible(false)}
-            >
+            <Pressable style={[styles.modalClose, { backgroundColor: '#374151' }]} onPress={() => setDiscountInputModalVisible(false)}>
               <Text style={styles.modalCloseText}>Close</Text>
             </Pressable>
           </View>
@@ -2412,12 +2359,7 @@ export default function ProductsScreen({
       </Modal>
 
       {/* ------------------------ DISCOUNT PRESET MODAL ------------------------ */}
-      <Modal
-        visible={discountPresetModalVisible}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setDiscountPresetModalVisible(false)}
-      >
+      <Modal visible={discountPresetModalVisible} transparent animationType="fade" onRequestClose={() => setDiscountPresetModalVisible(false)}>
         <View style={styles.modalOverlay}>
           <View style={[styles.modalCard, { width: '45%' }]}>
             <Text style={styles.modalTitle}>Predefined Discounts</Text>
@@ -2439,9 +2381,7 @@ export default function ProductsScreen({
                     marginBottom: 8,
                   }}
                 >
-                  <Text style={{ fontWeight: '900', color: '#111827' }}>
-                    {d.name}
-                  </Text>
+                  <Text style={{ fontWeight: '900', color: '#111827' }}>{d.name}</Text>
                   <Text style={{ fontSize: 12, color: '#6b7280', marginTop: 4 }}>
                     {d.mode === 'PERCENT' ? `${d.value}%` : `${toMoney(d.value)}`}
                     {d.scope ? ` • ${d.scope}` : ''}
@@ -2449,22 +2389,135 @@ export default function ProductsScreen({
                 </Pressable>
               ))}
 
-              {applicableDiscounts.length === 0 && (
-                <Text style={{ fontSize: 12, color: '#6b7280' }}>
-                  No applicable discounts.
-                </Text>
-              )}
+              {applicableDiscounts.length === 0 && <Text style={{ fontSize: 12, color: '#6b7280' }}>No applicable discounts.</Text>}
             </ScrollView>
 
-            <Pressable
-              style={[styles.modalClose, { backgroundColor: '#374151' }]}
-              onPress={() => setDiscountPresetModalVisible(false)}
-            >
+            <Pressable style={[styles.modalClose, { backgroundColor: '#374151' }]} onPress={() => setDiscountPresetModalVisible(false)}>
               <Text style={styles.modalCloseText}>Close</Text>
             </Pressable>
           </View>
         </View>
       </Modal>
+      {/* ✅ PRICE TIER MODAL */}
+            <Modal
+              visible={tierModalVisible}
+              transparent
+              animationType="fade"
+              onRequestClose={() => setTierModalVisible(false)}
+            >
+              <View style={styles.tierBackdrop}>
+                <View style={styles.tierCard}>
+                  {/* Header */}
+                  <View style={styles.tierHeader}>
+                    <View style={styles.tierTitleWrap}>
+                      <Text style={styles.tierTitle}>Select price tier</Text>
+                      <Text style={styles.tierSub}>Choose a tier to apply pricing overrides</Text>
+                    </View>
+      
+                    <Pressable
+                      onPress={() => setTierModalVisible(false)}
+                      style={({ pressed }) => [styles.tierCloseBtn, pressed && { opacity: 0.9 }]}
+                    >
+                      <Text style={styles.tierCloseText}>Close</Text>
+                    </Pressable>
+                  </View>
+      
+                  {/* Body */}
+                  {tierLoading ? (
+                    <View style={{ paddingVertical: 18, alignItems: "center" }}>
+                      <ActivityIndicator />
+                      <Text style={styles.tierLoadingText}>Loading tiers…</Text>
+                    </View>
+                  ) : (
+                    <ScrollView style={styles.tierList}>
+                      {/* Default / Remove tier */}
+                      <Pressable
+                        onPress={() => applyTier(null)}
+                        style={({ pressed }) => [
+                          styles.tierRow,
+                          !activeTier && styles.tierRowSelected,
+                          pressed && styles.tierRowPressed,
+                        ]}
+                      >
+                        <View style={styles.tierRowLeft}>
+                          <Text style={styles.tierRowText}>Default pricing</Text>
+                          <Text style={styles.tierRowCode}>Remove tier</Text>
+                        </View>
+      
+                        {!activeTier ? (
+                          <View style={styles.tierCheck}>
+                            <Text style={styles.tierCheckText}>✓</Text>
+                          </View>
+                        ) : null}
+                      </Pressable>
+      
+                      {/* Tiers */}
+                      {tiers.map((t) => {
+                        const isSelected = activeTier?.id === t.id;
+      
+                        return (
+                          <Pressable
+                            key={t.id}
+                            onPress={() => applyTier(t)}
+                            style={({ pressed }) => [
+                              styles.tierRow,
+                              isSelected && styles.tierRowSelected,
+                              pressed && styles.tierRowPressed,
+                            ]}
+                          >
+                            <View style={styles.tierRowLeft}>
+                              <Text style={styles.tierRowText}>{t.name}</Text>
+                              <Text style={styles.tierRowCode}>
+                                {(t.code || "").toUpperCase()}
+                                {t.type ? ` • ${String(t.type).toUpperCase()}` : ""}
+                              </Text>
+                            </View>
+      
+                            {isSelected ? (
+                              <View style={styles.tierCheck}>
+                                <Text style={styles.tierCheckText}>✓</Text>
+                              </View>
+                            ) : null}
+                          </Pressable>
+                        );
+                      })}
+      
+                      {!tiers.length ? (
+                        <Text style={{ color: "#6B7280", paddingHorizontal: 16, paddingVertical: 10 }}>
+                          No active tiers found.
+                        </Text>
+                      ) : null}
+                    </ScrollView>
+                  )}
+      
+                  {/* Footer */}
+                  <View style={styles.tierFooter}>
+                    <Pressable
+                      onPress={() => setTierModalVisible(false)}
+                      style={({ pressed }) => [
+                        styles.tierBtn,
+                        styles.tierBtnGhost,
+                        pressed && { opacity: 0.9 },
+                      ]}
+                    >
+                      <Text style={[styles.tierBtnText, styles.tierBtnTextGhost]}>Cancel</Text>
+                    </Pressable>
+      
+                    <Pressable
+                      onPress={() => setTierModalVisible(false)}
+                      style={({ pressed }) => [
+                        styles.tierBtn,
+                        styles.tierBtnPrimary,
+                        pressed && { opacity: 0.9 },
+                      ]}
+                    >
+                      <Text style={[styles.tierBtnText, styles.tierBtnTextPrimary]}>Done</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              </View>
+            </Modal>
+
     </SafeAreaView>
   );
 }
@@ -2827,70 +2880,6 @@ const styles = StyleSheet.create({
   },
   modalCloseText: { color: '#ffffff', fontSize: 13, fontWeight: '600' },
 
-  methodBtn: {
-    borderWidth: 1,
-    borderColor: '#e5e7eb',
-    borderRadius: 10,
-    paddingVertical: 12,
-    paddingHorizontal: 12,
-    marginBottom: 10,
-    backgroundColor: '#ffffff',
-  },
-  methodBtnActive: {
-    borderColor: '#111827',
-    backgroundColor: '#f3f4f6',
-  },
-  methodText: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: '#111827',
-  },
-
-  quickRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    marginTop: 8,
-  },
-  quickBtn: {
-    backgroundColor: '#111827',
-    borderRadius: 999,
-    paddingVertical: 8,
-    paddingHorizontal: 14,
-    marginRight: 10,
-    marginBottom: 10,
-  },
-  quickText: {
-    color: '#ffffff',
-    fontSize: 12,
-    fontWeight: '700',
-  },
-
-  customRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 6,
-  },
-  customInput: {
-    flex: 1,
-    borderWidth: 1,
-    borderColor: '#d1d5db',
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    backgroundColor: '#f9fafb',
-    marginRight: 10,
-  },
-  doneBtn: {
-    backgroundColor: '#111827',
-    borderRadius: 999,
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-  },
-  doneText: {
-    color: '#ffffff',
-    fontSize: 13,
-    fontWeight: '700',
-  },
   paymentCard: {
     width: '30%',
     maxHeight: '80%',
@@ -2915,49 +2904,6 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     padding: 16,
   },
-  amountHeader: {
-    marginBottom: 10,
-  },
-  amountRemainingText: {
-    fontSize: 12,
-    color: '#6b7280',
-    marginTop: 4,
-    fontWeight: '700',
-  },
-  amountRow: {
-    backgroundColor: '#111827',
-    borderRadius: 999,
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-    marginBottom: 10,
-    alignItems: 'center',
-  },
-  amountText: {
-    color: '#ffffff',
-    fontWeight: '700',
-    fontSize: 12,
-  },
-
-  customAmountBox: { marginTop: 10 },
-  customLabel: { fontSize: 12, color: '#6b7280', marginBottom: 6 },
-  customInput: {
-    borderWidth: 1,
-    borderColor: '#d1d5db',
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    fontSize: 14,
-    backgroundColor: '#f9fafb',
-    color: '#111827',
-  },
-  customApplyButton: {
-    marginTop: 10,
-    backgroundColor: '#111827',
-    borderRadius: 999,
-    paddingVertical: 12,
-    alignItems: 'center',
-  },
-  customApplyText: { color: '#fff', fontWeight: '700' },
   amountHeaderRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -3024,7 +2970,13 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
 
-  customerCard: { width: '35%', maxHeight: '85%', backgroundColor: '#ffffff', borderRadius: 14, padding: 16 },
+  customerCard: {
+    width: '35%',
+    maxHeight: '85%',
+    backgroundColor: '#ffffff',
+    borderRadius: 14,
+    padding: 16,
+  },
   customerSearchRow: { flexDirection: 'row', alignItems: 'center', marginTop: 8, marginBottom: 8 },
   customerSearchInput: {
     flex: 1,
@@ -3059,6 +3011,104 @@ const styles = StyleSheet.create({
   customerSaveButton: { alignSelf: 'flex-end', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999, backgroundColor: BLACK },
   customerSaveText: { color: '#ffffff', fontSize: 13, fontWeight: '600' },
 
+  // ✅ tier modal styles
+  tierBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(17, 24, 39, 0.45)", // slate-900/45
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 16,
+  },
+  tierCard: {
+    width: "34%",
+    minWidth: 340,
+    maxWidth: 460,
+    maxHeight: "78%",
+    backgroundColor: "#fff",
+    borderRadius: 18,
+    overflow: "hidden"
+  },
+  tierHeader: {
+    paddingHorizontal: 16,
+    paddingTop: 14,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: "#EEF2F7",
+    backgroundColor: "#FFFFFF",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  tierTitleWrap: { flex: 1, paddingRight: 10 },
+  tierTitle: { fontSize: 16, fontWeight: "800", color: "#111827" },
+  tierSub: { marginTop: 4, fontSize: 12, color: "#6B7280" },
+  tierCloseBtn: {
+    height: 34,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    backgroundColor: "#F3F4F6",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  tierCloseText: { fontSize: 12, fontWeight: "700", color: "#111827" },
+  tierList: { paddingVertical: 10 },
+  tierRow: {
+    marginHorizontal: 12,
+    marginVertical: 6,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#EEF2F7",
+    backgroundColor: "#FFFFFF",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  tierRowPressed: { opacity: 0.9, transform: [{ scale: 0.995 }] },
+  tierRowLeft: { flex: 1, paddingRight: 10 },
+  tierRowText: { fontSize: 14, color: "#111827", fontWeight: "800" },
+  tierRowCode: { marginTop: 2, fontSize: 12, color: "#6B7280" },
+  tierRowSelected: {
+    borderColor: "#111827",
+    backgroundColor: "#F9FAFB",
+  },
+  tierCheck: {
+    height: 26,
+    minWidth: 26,
+    paddingHorizontal: 8,
+    borderRadius: 999,
+    backgroundColor: "#111827",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  tierCheckText: { color: "#fff", fontSize: 12, fontWeight: "900" },
+  tierFooter: {
+    padding: 12,
+    borderTopWidth: 1,
+    borderTopColor: "#EEF2F7",
+    backgroundColor: "#FFFFFF",
+    flexDirection: "row",
+    gap: 10,
+  },
+  tierBtn: {
+    flex: 1,
+    height: 44,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  tierBtnGhost: {
+    backgroundColor: "#F3F4F6",
+  },
+  tierBtnPrimary: {
+    backgroundColor: "#111827",
+  },
+  tierBtnText: { fontSize: 13, fontWeight: "900" },
+  tierBtnTextGhost: { color: "#111827" },
+  tierBtnTextPrimary: { color: "#fff" },
 
+  // Loading line (optional)
+  tierLoadingText: { marginHorizontal: 16, marginTop: 10, fontSize: 12, color: "#6B7280" },
 
 });
