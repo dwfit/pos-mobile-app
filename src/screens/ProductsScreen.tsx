@@ -986,7 +986,7 @@ export default function ProductsScreen({
     return () => {
       mounted = false;
     };
-  }, [online]);
+  }, [categoryId, isOnline]);
 
 
   /* ------------------------ SYNC ORDERS CACHE (for OrdersScreen offline) ------------------------ */
