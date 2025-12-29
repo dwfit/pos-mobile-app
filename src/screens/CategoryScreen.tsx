@@ -16,8 +16,6 @@ import {
 import { get, post } from "../lib/api";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
-
-
 // 🔊 sound for new orders
 import { Audio } from "expo-av";
 
@@ -34,7 +32,8 @@ import {
 import { syncMenu } from "../sync/menuSync";
 
 // ✅ Tier Pricing
-import { fetchActivePriceTiers, getTierPricingForIds } from "../services/tierPricing";
+import { getTierPricingForIds } from "../services/tierPricing";
+import { loadPriceTiersWithSync } from "../sync/priceTierSync";
 import { usePriceTierStore, type PriceTier } from "../store/priceTierStore";
 
 type Category = {
@@ -131,7 +130,9 @@ type OrdersChangedPayload = {
   action?: "created" | "updated";
 };
 
-function subscribeOrdersChanged(handler: (payload: OrdersChangedPayload) => void) {
+function subscribeOrdersChanged(
+  handler: (payload: OrdersChangedPayload) => void
+) {
   const s = getSocket();
   const listener = (payload: any) => {
     console.log("🛰 CategoryScreen WS orders:changed", payload);
@@ -240,6 +241,75 @@ function normalizePrice(raw: any): number {
   const n = parseFloat(String(raw));
   return Number.isNaN(n) ? 0 : n;
 }
+
+const PRICE_TIERS_CACHE_KEY = "pos_price_tiers_v1";
+
+async function loadCachedPriceTiers(): Promise<PriceTier[]> {
+  try {
+    const raw = await AsyncStorage.getItem(PRICE_TIERS_CACHE_KEY);
+    if (!raw) return [];
+
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+
+    return parsed.map((t: any) => ({
+      id: String(t.id),
+      name: String(t.name),
+      code: t.code ?? null,
+      type: t.type ?? null,
+      isActive: t.isActive !== false,
+    })) as PriceTier[];
+  } catch (e) {
+    console.log("LOAD PRICE TIERS CACHE ERR", e);
+    return [];
+  }
+}
+
+async function saveCachedPriceTiers(list: PriceTier[]): Promise<void> {
+  try {
+    const payload = list.map((t) => ({
+      id: t.id,
+      name: t.name,
+      code: t.code ?? null,
+      type: t.type ?? null,
+      isActive: t.isActive !== false,
+    }));
+    await AsyncStorage.setItem(PRICE_TIERS_CACHE_KEY, JSON.stringify(payload));
+  } catch (e) {
+    console.log("SAVE PRICE TIERS CACHE ERR", e);
+  }
+}
+
+async function refreshPriceTiersFromServer(): Promise<PriceTier[]> {
+  try {
+    const { branchId, brandId } = await getDeviceInfo();
+
+    const params = new URLSearchParams();
+    if (branchId) params.append("branchId", branchId);
+    if (brandId) params.append("brandId", brandId);
+
+    const resp = await get(`/pricing/tiers?${params.toString()}`);
+    const arr = Array.isArray(resp) ? resp : [];
+
+    console.log("📦 PRICE TIERS API (CategoryScreen):", arr);
+
+    const list: PriceTier[] = arr.map((t: any) => ({
+      id: String(t.id),
+      name: String(t.name),
+      code: t.code ?? null,
+      type: t.type ?? null,
+      isActive: t.isActive !== false,
+    }));
+
+    const activeList = list.filter((t) => t.isActive !== false);
+    await saveCachedPriceTiers(activeList);
+    return activeList;
+  } catch (e) {
+    console.log("REFRESH PRICE TIERS ERR", e);
+    throw e;
+  }
+}
+
 
 function calcLineModifierTotal(mods?: CartModifier[]): number {
   if (!mods || !Array.isArray(mods)) return 0;
@@ -432,7 +502,6 @@ export default function CategoryScreen({
   const setActiveTier = usePriceTierStore((s) => s.setActiveTier);
   const hydrateTier = usePriceTierStore((s) => s.hydrate);
 
-
   const cartItems: CartItem[] = Array.isArray(cart) ? cart : [];
 
   async function loadAppliedDiscountFromStorage() {
@@ -508,7 +577,10 @@ export default function CategoryScreen({
       const data = await get("/orders" + qs);
       const arr = Array.isArray(data) ? data : [];
 
-      console.log("🌐 CategoryScreen syncOrdersCache: fetched orders:", arr.length);
+      console.log(
+        "🌐 CategoryScreen syncOrdersCache: fetched orders:",
+        arr.length
+      );
       const locals: LocalOrder[] = arr.map(toLocalOrder);
       await saveOrdersLocal(locals);
     } catch (e) {
@@ -557,11 +629,17 @@ export default function CategoryScreen({
         try {
           const bid = await getEffectiveBrandId();
           if (!bid) {
-            console.log("❌ CategoryScreen: missing brandId, skip syncMenu");
+            console.log(
+              "❌ CategoryScreen: missing brandId, skip syncMenu"
+            );
             return;
           }
 
-          await syncMenu({ brandId: bid, forceFull: true, includeInactive: true });
+          await syncMenu({
+            brandId: bid,
+            forceFull: true,
+            includeInactive: true,
+          });
 
           if (!mounted) return;
           const fresh = await getLocalCategories();
@@ -603,13 +681,20 @@ export default function CategoryScreen({
         const bid = await getEffectiveBrandId();
         if (!bid) return;
 
-        await syncMenu({ brandId: bid, forceFull: true, includeInactive: true });
+        await syncMenu({
+          brandId: bid,
+          forceFull: true,
+          includeInactive: true,
+        });
 
         const fresh = await getLocalCategories();
         const mappedFresh = mapLocalCategories(fresh);
         setCategories(mappedFresh);
         setFiltered(mappedFresh);
-        console.log("🌐 Categories auto-updated from server:", mappedFresh.length);
+        console.log(
+          "🌐 Categories auto-updated from server:",
+          mappedFresh.length
+        );
 
         await syncOrdersCache();
       } catch (e) {
@@ -640,7 +725,10 @@ export default function CategoryScreen({
       console.log("🔘 Manual syncMenu from CategoryScreen");
       const bid = await getEffectiveBrandId();
       if (!bid) {
-        Alert.alert("Missing brand", "brandId is missing. Please re-activate device.");
+        Alert.alert(
+          "Missing brand",
+          "brandId is missing. Please re-activate device."
+        );
         return;
       }
 
@@ -700,21 +788,79 @@ export default function CategoryScreen({
     let mounted = true;
 
     (async () => {
-      try {
-        const saved = await loadActiveTier();
-        if (mounted) setActiveTierState(saved);
+      // 1) local cache first
+      const cached = await loadCachedPriceTiers();
+      if (mounted && cached.length) {
+        console.log("📥 PRICE TIERS from cache:", cached.length);
+        setTiers(cached);
+      }
 
-        if (!online) return;
+      // 2) if online, refresh from API
+      if (!online) return;
+
+      try {
         setTierLoading(true);
-        const list = await fetchActivePriceTiers();
+        const fresh = await refreshPriceTiersFromServer();
+        if (mounted) {
+          console.log("🌐 PRICE TIERS from server:", fresh.length);
+          setTiers(fresh);
+        }
+      } catch (e) {
+        // if server fails, we still have cache (or empty)
+        console.log("load price tiers error", e);
+      } finally {
+        if (mounted) setTierLoading(false);
+      }
+    })();
+
+    return () => {
+      mounted = false;
+    };
+  }, [online]);
+
+
+  /* ------------------------ LOAD PRICE TIERS (offline-first from SQLite + server check) ------------------------ */
+  useEffect(() => {
+    let mounted = true;
+
+    (async () => {
+      try {
+        setTierLoading(true);
+
+        // ensure branch/brand are populated
+        try {
+          const info = await getDeviceInfo();
+          if (info.branchId && !branchId) setBranchId(info.branchId);
+          if (info.brandId && !brandId) setBrandId(info.brandId);
+        } catch (e) {
+          console.log("READ deviceInfo ERR (Tier load)", e);
+        }
+
+        const { tiers } = await loadPriceTiersWithSync({
+          branchId: branchId ?? undefined,
+          brandId: brandId ?? undefined,
+        });
+
         if (!mounted) return;
+
+        const list: PriceTier[] = (tiers || [])
+          .filter((t: any) => t.isActive !== 0)
+          .map((t: any) => ({
+            id: t.id,
+            name: t.name,
+            code: t.code ?? null,
+            // optional: type if you store it
+            type: (t as any).type ?? null,
+          }));
+
         setTiers(list);
 
-        // if saved tier no longer active, clear it
-        if (saved?.id && !list.some((t) => t.id === saved.id)) {
+        // if active tier no longer exists, clear it and restore prices
+        if (activeTier?.id && !list.some((t) => t.id === activeTier.id)) {
           await setActiveTier(null);
-          setActiveTierState(null);
-          setCart((prev: CartItem[]) => clearTierFromCartLocal(Array.isArray(prev) ? prev : []));
+          setCart((prev: CartItem[]) =>
+            clearTierFromCartLocal(Array.isArray(prev) ? prev : [])
+          );
         }
       } catch (e) {
         console.log("load price tiers error", e);
@@ -726,7 +872,7 @@ export default function CategoryScreen({
     return () => {
       mounted = false;
     };
-  }, [online]);
+  }, [online, branchId, brandId, activeTier?.id, setActiveTier, setCart]);
 
   /* ------------------------ POLL BADGE FROM STORAGE ------------------------ */
   useEffect(() => {
@@ -767,7 +913,8 @@ export default function CategoryScreen({
 
       unsubscribe = subscribeOrdersChanged(async (payload) => {
         try {
-          if (payload.branchId && branchId && payload.branchId !== branchId) return;
+          if (payload.branchId && branchId && payload.branchId !== branchId)
+            return;
 
           const ch = String(payload.channel || "").toUpperCase();
           const st = String(payload.status || "").toUpperCase();
@@ -776,7 +923,10 @@ export default function CategoryScreen({
           if (ch === "CALLCENTER" && st === "PENDING" && isNew) {
             setOrdersBadge((prev) => {
               const next = prev + 1;
-              AsyncStorage.setItem("newOrdersCount", String(next)).catch(() => {
+              AsyncStorage.setItem(
+                "newOrdersCount",
+                String(next)
+              ).catch(() => {
                 console.log("BADGE SAVE ERR (CategoryScreen)");
               });
               return next;
@@ -787,7 +937,10 @@ export default function CategoryScreen({
 
           await syncOrdersCache();
         } catch (e) {
-          console.log("WS orders:changed handler error (CategoryScreen)", e);
+          console.log(
+            "WS orders:changed handler error (CategoryScreen)",
+            e
+          );
         }
       });
     })();
@@ -804,7 +957,9 @@ export default function CategoryScreen({
       setFiltered(categories);
       return;
     }
-    setFiltered(categories.filter((c) => c.name.toLowerCase().includes(q)));
+    setFiltered(
+      categories.filter((c) => c.name.toLowerCase().includes(q))
+    );
   }, [search, categories]);
 
   function onCategoryPress(cat: Category) {
@@ -821,14 +976,20 @@ export default function CategoryScreen({
 
   /* ------------------------ CART TOTALS + PAYMENT CALC ------------------------ */
 
-  const rawCartTotal: number = cartItems.reduce((sum, it) => sum + calcLineTotal(it), 0);
+  const rawCartTotal: number = cartItems.reduce(
+    (sum, it) => sum + calcLineTotal(it),
+    0
+  );
 
   let discountAmount = 0;
   if (appliedDiscount && rawCartTotal > 0) {
     if (appliedDiscount.kind === "AMOUNT") {
       discountAmount = Math.min(rawCartTotal, appliedDiscount.value);
     } else if (appliedDiscount.kind === "PERCENT") {
-      discountAmount = Math.min(rawCartTotal, (rawCartTotal * appliedDiscount.value) / 100);
+      discountAmount = Math.min(
+        rawCartTotal,
+        (rawCartTotal * appliedDiscount.value) / 100
+      );
     }
   }
 
@@ -836,7 +997,9 @@ export default function CategoryScreen({
 
   const vatFraction = vatRate > 0 ? vatRate / 100 : 0;
   const subtotalEx =
-    cartTotal > 0 && vatFraction > 0 ? cartTotal / (1 + vatFraction) : cartTotal;
+    cartTotal > 0 && vatFraction > 0
+      ? cartTotal / (1 + vatFraction)
+      : cartTotal;
   const vatAmount = cartTotal - subtotalEx;
 
   const totalPaid = payments.reduce((s, p) => s + p.amount, 0);
@@ -918,7 +1081,10 @@ export default function CategoryScreen({
       console.log("CREATE CUSTOMER ERROR (CategoryScreen)", err);
       const msg = String(err?.message || err);
       if (msg.includes("Customer already exists")) {
-        Alert.alert("Customer already exists", "A customer with this phone already exists.");
+        Alert.alert(
+          "Customer already exists",
+          "A customer with this phone already exists."
+        );
       } else {
         Alert.alert("Error", "Failed to create customer.");
       }
@@ -950,12 +1116,12 @@ export default function CategoryScreen({
 
     setTierModalVisible(true);
 
-    // refresh tiers online
+    // 🔄 refresh from server when modal opens (if online)
     if (online) {
       try {
         setTierLoading(true);
-        const list = await fetchActivePriceTiers();
-        setTiers(list);
+        const fresh = await refreshPriceTiersFromServer();
+        setTiers(fresh);
       } catch (e) {
         console.log("refresh tiers error", e);
       } finally {
@@ -964,10 +1130,19 @@ export default function CategoryScreen({
     }
   }
 
+
   async function applyTier(tier: PriceTier | null) {
     try {
-      // 1) save selected tier (store + AsyncStorage)
-      setActiveTier(tier ? { id: tier.id, name: tier.name } : null);
+      // 1) save selected tier in store (incl. code for header display)
+      setActiveTier(
+        tier
+          ? {
+            id: tier.id,
+            name: tier.name,
+            code: tier.code ?? null,
+          }
+          : null
+      );
 
       // 2) clear tier => restore original prices
       if (!tier) {
@@ -987,8 +1162,6 @@ export default function CategoryScreen({
         return;
       }
 
-
-
       const resp = await getTierPricingForIds({
         tierId: tier.id,
         productSizeIds,
@@ -998,25 +1171,12 @@ export default function CategoryScreen({
       // 4) update cart prices locally
       setCart((prev: CartItem[]) => {
         const arr = Array.isArray(prev) ? prev : [];
-        return applyTierToCartLocal(arr, resp.sizesMap, resp.modifierItemsMap);
+        return applyTierToCartLocal(
+          arr,
+          resp?.sizesMap || {},
+          resp?.modifierItemsMap || {}
+        );
       });
-
-      // 5) (optional but recommended) cache the overrides for this tier
-      // If you already have a function that returns arrays, adapt accordingly.
-      // Here we build a cache based on your resp maps:
-      try {
-        const cache: TierPricingCache = {
-          tierId: tier.id,
-          updatedAt: new Date().toISOString(),
-          sizePriceBySizeId: resp.sizesMap || {},
-          modifierPriceByItemId: resp.modifierItemsMap || {},
-        };
-        // persist + keep in-memory
-        await saveTierCache(cache);
-        usePriceTierStore.getState().setTierCache(tier.id, cache);
-      } catch {
-        // ignore cache errors
-      }
 
       setTierModalVisible(false);
     } catch (e: any) {
@@ -1024,7 +1184,6 @@ export default function CategoryScreen({
       Alert.alert("Tier pricing", e?.message || "Failed to apply tier pricing");
     }
   }
-
 
   /* ------------------------ PAYMENT FLOW ------------------------ */
 
@@ -1037,7 +1196,9 @@ export default function CategoryScreen({
     setPaymentModalVisible(true);
   }
 
-  const selectedMethod = paymentMethods.find((m) => m.id === selectedPaymentMethodId);
+  const selectedMethod = paymentMethods.find(
+    (m) => m.id === selectedPaymentMethodId
+  );
   const selectedPaymentName = selectedMethod?.name || "";
 
   function addPayment(amount: number) {
@@ -1067,7 +1228,8 @@ export default function CategoryScreen({
 
     if (amount > effectiveRemaining) {
       const change = amount - effectiveRemaining;
-      if (change > 0.01) Alert.alert("Change", `Return to customer: ${toMoney(change)}`);
+      if (change > 0.01)
+        Alert.alert("Change", `Return to customer: ${toMoney(change)}`);
     }
   }
 
@@ -1109,7 +1271,10 @@ export default function CategoryScreen({
       }
 
       if (!finalDeviceId) {
-        Alert.alert("Device not activated", "deviceId is missing. Please re-activate this POS device.");
+        Alert.alert(
+          "Device not activated",
+          "deviceId is missing. Please re-activate this POS device."
+        );
         return;
       }
 
@@ -1145,7 +1310,8 @@ export default function CategoryScreen({
         payments,
       };
 
-      if (selectedCustomer?.id) basePayload.customerId = String(selectedCustomer.id);
+      if (selectedCustomer?.id)
+        basePayload.customerId = String(selectedCustomer.id);
 
       if (appliedDiscount && discountAmount > 0) {
         basePayload.discountAmount = discountAmount;
@@ -1154,7 +1320,10 @@ export default function CategoryScreen({
           value: appliedDiscount.value,
           amount: discountAmount,
           source: appliedDiscount.source ?? null,
-          name: appliedDiscount.name || appliedDiscount.label || null,
+          name:
+            appliedDiscount.name ||
+            appliedDiscount.label ||
+            null,
           configId: appliedDiscount.id ?? null,
           scope: "ORDER",
         };
@@ -1248,7 +1417,10 @@ export default function CategoryScreen({
       }
 
       if (!finalDeviceId) {
-        Alert.alert("Device not activated", "deviceId is missing. Please re-activate this POS device.");
+        Alert.alert(
+          "Device not activated",
+          "deviceId is missing. Please re-activate this POS device."
+        );
         return;
       }
 
@@ -1295,7 +1467,10 @@ export default function CategoryScreen({
           value: appliedDiscount.value,
           amount: discountAmount,
           source: appliedDiscount.source ?? null,
-          name: appliedDiscount.name || appliedDiscount.label || null,
+          name:
+            appliedDiscount.name ||
+            appliedDiscount.label ||
+            null,
           configId: appliedDiscount.id ?? null,
           scope: "ORDER",
         };
@@ -1358,7 +1533,10 @@ export default function CategoryScreen({
             }
 
             if (!finalDeviceId) {
-              Alert.alert("Device not activated", "deviceId is missing. Please re-activate this POS device.");
+              Alert.alert(
+                "Device not activated",
+                "deviceId is missing. Please re-activate this POS device."
+              );
               return;
             }
 
@@ -1405,7 +1583,10 @@ export default function CategoryScreen({
                 value: appliedDiscount.value,
                 amount: discountAmount,
                 source: appliedDiscount.source ?? null,
-                name: appliedDiscount.name || appliedDiscount.label || null,
+                name:
+                  appliedDiscount.name ||
+                  appliedDiscount.label ||
+                  null,
                 configId: appliedDiscount.id ?? null,
                 scope: "ORDER",
               };
@@ -1429,7 +1610,10 @@ export default function CategoryScreen({
             await syncOrdersCache();
           } catch (err: any) {
             console.log("VOID ORDER ERROR (CategoryScreen)", err);
-            Alert.alert("Error", err?.message || "Failed to void this order");
+            Alert.alert(
+              "Error",
+              err?.message || "Failed to void this order"
+            );
           } finally {
             setVoidLoading(false);
           }
@@ -1438,7 +1622,8 @@ export default function CategoryScreen({
     ]);
   }
 
-  const payDisabled = paying || cartTotal <= 0 || remaining > 0.01 || payments.length === 0;
+  const payDisabled =
+    paying || cartTotal <= 0 || remaining > 0.01 || payments.length === 0;
 
   /* ------------------------ RENDER ------------------------ */
 
@@ -1450,7 +1635,12 @@ export default function CategoryScreen({
           <Text style={styles.topSub}>Branch: {branchName || "-"}</Text>
           <Text style={styles.topSub}>User: {userName || "-"}</Text>
           <Text style={styles.topSub}>
-            Price Tier: {activeTier ? `${activeTier.name} (${activeTier.code})` : "-"}
+            Price Tier:{" "}
+            {activeTier
+              ? activeTier.code
+                ? `${activeTier.name} (${activeTier.code})`
+                : activeTier.name
+              : "-"}
           </Text>
         </View>
       </View>
@@ -1491,7 +1681,8 @@ export default function CategoryScreen({
             ) : (
               cartItems.map((item, idx) => {
                 const unitWithMods =
-                  normalizePrice(item.price) + calcLineModifierTotal(item.modifiers);
+                  normalizePrice(item.price) +
+                  calcLineModifierTotal(item.modifiers);
                 const mods = item.modifiers || [];
 
                 return (
@@ -1521,7 +1712,10 @@ export default function CategoryScreen({
                       </View>
 
                       {mods.length > 0 && (
-                        <Text style={styles.orderItemModifiers} numberOfLines={2}>
+                        <Text
+                          style={styles.orderItemModifiers}
+                          numberOfLines={2}
+                        >
                           {mods.map((m) => m.itemName).join(", ")}
                         </Text>
                       )}
@@ -1579,7 +1773,9 @@ export default function CategoryScreen({
                 <View style={styles.discountInputWrap}>
                   <TextInput
                     style={styles.discountInput}
-                    value={discountAmount > 0 ? `-${toMoney(discountAmount)}` : ""}
+                    value={
+                      discountAmount > 0 ? `-${toMoney(discountAmount)}` : ""
+                    }
                     editable={false}
                     pointerEvents="none"
                   />
@@ -1594,14 +1790,19 @@ export default function CategoryScreen({
                     await AsyncStorage.removeItem(DISCOUNT_STORAGE_KEY);
                   }}
                 >
-                  <Text style={styles.removeDiscountText}>Remove discount</Text>
+                  <Text style={styles.removeDiscountText}>
+                    Remove discount
+                  </Text>
                 </Pressable>
               )}
 
               {groupedPaymentsArray.length > 0 && (
                 <View style={styles.paymentsSummaryBox}>
                   {groupedPaymentsArray.map((p) => (
-                    <View key={p.methodName} style={styles.paymentSummaryRow}>
+                    <View
+                      key={p.methodName}
+                      style={styles.paymentSummaryRow}
+                    >
                       <Text style={styles.paymentSummaryLabel}>
                         {p.methodName}
                       </Text>
@@ -1620,9 +1821,14 @@ export default function CategoryScreen({
               )}
             </View>
 
-            <Pressable style={styles.totalButton} onPress={openPaymentModal}>
+            <Pressable
+              style={styles.totalButton}
+              onPress={openPaymentModal}
+            >
               <Text style={styles.totalButtonLabel}>TOTAL</Text>
-              <Text style={styles.totalButtonValue}>{toMoney(cartTotal)}</Text>
+              <Text style={styles.totalButtonValue}>
+                {toMoney(cartTotal)}
+              </Text>
             </Pressable>
           </View>
         </View>
@@ -1652,7 +1858,8 @@ export default function CategoryScreen({
               else if (isSync) onPress = handleSyncPress;
               else if (isTier) onPress = openTierModal;
 
-              const disabled = (isVoid && voidLoading) || (isSync && syncing);
+              const disabled =
+                (isVoid && voidLoading) || (isSync && syncing);
 
               return (
                 <Pressable
@@ -1723,12 +1930,18 @@ export default function CategoryScreen({
                           style={styles.categoryImage}
                           resizeMode="cover"
                           onError={(e) => {
-                            console.log("❌ Category image failed:", img, e?.nativeEvent);
+                            console.log(
+                              "❌ Category image failed:",
+                              img,
+                              e?.nativeEvent
+                            );
                           }}
                         />
                       ) : (
                         <View style={styles.categoryPlaceholder}>
-                          <Text style={styles.categoryPlaceholderText}>IMG</Text>
+                          <Text style={styles.categoryPlaceholderText}>
+                            IMG
+                          </Text>
                         </View>
                       );
                     })()}
@@ -1765,22 +1978,33 @@ export default function CategoryScreen({
         )}
 
         <Pressable
-          style={[styles.payButton, payDisabled && styles.payButtonDisabled]}
+          style={[
+            styles.payButton,
+            payDisabled && styles.payButtonDisabled,
+          ]}
           onPress={handlePay}
           disabled={payDisabled}
         >
-          <Text style={styles.payButtonText}>{paying ? "PAYING..." : "PAY"}</Text>
+          <Text style={styles.payButtonText}>
+            {paying ? "PAYING..." : "PAY"}
+          </Text>
         </Pressable>
       </View>
 
       {/* Bottom POS bar */}
       <View style={styles.bottomBar}>
-        <Pressable style={styles.bottomItem} onPress={() => navigation.navigate("Home")}>
+        <Pressable
+          style={styles.bottomItem}
+          onPress={() => navigation.navigate("Home")}
+        >
           <Text style={styles.bottomIcon}>🏠</Text>
           <Text style={styles.bottomLabel}>HOME</Text>
         </Pressable>
 
-        <Pressable style={[styles.bottomItem]} onPress={() => navigation.navigate("Orders")}>
+        <Pressable
+          style={[styles.bottomItem]}
+          onPress={() => navigation.navigate("Orders")}
+        >
           <Text style={[styles.bottomIcon]}>🧾</Text>
           <Text style={[styles.bottomLabel]}>ORDERS</Text>
 
@@ -1793,7 +2017,10 @@ export default function CategoryScreen({
           )}
         </Pressable>
 
-        <Pressable style={styles.bottomItem} onPress={() => console.log("TABLES pressed")}>
+        <Pressable
+          style={styles.bottomItem}
+          onPress={() => console.log("TABLES pressed")}
+        >
           <Text style={styles.bottomIcon}>📋</Text>
           <Text style={styles.bottomLabel}>TABLES</Text>
         </Pressable>
@@ -1817,12 +2044,17 @@ export default function CategoryScreen({
             <View style={styles.tierHeader}>
               <View style={styles.tierTitleWrap}>
                 <Text style={styles.tierTitle}>Select price tier</Text>
-                <Text style={styles.tierSub}>Choose a tier to apply pricing overrides</Text>
+                <Text style={styles.tierSub}>
+                  Choose a tier to apply pricing overrides
+                </Text>
               </View>
 
               <Pressable
                 onPress={() => setTierModalVisible(false)}
-                style={({ pressed }) => [styles.tierCloseBtn, pressed && { opacity: 0.9 }]}
+                style={({ pressed }) => [
+                  styles.tierCloseBtn,
+                  pressed && { opacity: 0.9 },
+                ]}
               >
                 <Text style={styles.tierCloseText}>Close</Text>
               </Pressable>
@@ -1830,9 +2062,13 @@ export default function CategoryScreen({
 
             {/* Body */}
             {tierLoading ? (
-              <View style={{ paddingVertical: 18, alignItems: "center" }}>
+              <View
+                style={{ paddingVertical: 18, alignItems: "center" }}
+              >
                 <ActivityIndicator />
-                <Text style={styles.tierLoadingText}>Loading tiers…</Text>
+                <Text style={styles.tierLoadingText}>
+                  Loading tiers…
+                </Text>
               </View>
             ) : (
               <ScrollView style={styles.tierList}>
@@ -1875,7 +2111,9 @@ export default function CategoryScreen({
                         <Text style={styles.tierRowText}>{t.name}</Text>
                         <Text style={styles.tierRowCode}>
                           {(t.code || "").toUpperCase()}
-                          {t.type ? ` • ${String(t.type).toUpperCase()}` : ""}
+                          {t.type
+                            ? ` • ${String(t.type).toUpperCase()}`
+                            : ""}
                         </Text>
                       </View>
 
@@ -1889,7 +2127,13 @@ export default function CategoryScreen({
                 })}
 
                 {!tiers.length ? (
-                  <Text style={{ color: "#6B7280", paddingHorizontal: 16, paddingVertical: 10 }}>
+                  <Text
+                    style={{
+                      color: "#6B7280",
+                      paddingHorizontal: 16,
+                      paddingVertical: 10,
+                    }}
+                  >
                     No active tiers found.
                   </Text>
                 ) : null}
@@ -1906,7 +2150,14 @@ export default function CategoryScreen({
                   pressed && { opacity: 0.9 },
                 ]}
               >
-                <Text style={[styles.tierBtnText, styles.tierBtnTextGhost]}>Cancel</Text>
+                <Text
+                  style={[
+                    styles.tierBtnText,
+                    styles.tierBtnTextGhost,
+                  ]}
+                >
+                  Cancel
+                </Text>
               </Pressable>
 
               <Pressable
@@ -1917,13 +2168,19 @@ export default function CategoryScreen({
                   pressed && { opacity: 0.9 },
                 ]}
               >
-                <Text style={[styles.tierBtnText, styles.tierBtnTextPrimary]}>Done</Text>
+                <Text
+                  style={[
+                    styles.tierBtnText,
+                    styles.tierBtnTextPrimary,
+                  ]}
+                >
+                  Done
+                </Text>
               </Pressable>
             </View>
           </View>
         </View>
       </Modal>
-
 
       {/* Order type popup */}
       <Modal
@@ -2035,9 +2292,14 @@ export default function CategoryScreen({
                     <Pressable
                       style={styles.customApplyButton}
                       onPress={() => {
-                        const val = parseFloat(customAmountInput || "0");
+                        const val = parseFloat(
+                          customAmountInput || "0"
+                        );
                         if (!val || val <= 0) {
-                          Alert.alert("Invalid amount", "Please enter a valid amount.");
+                          Alert.alert(
+                            "Invalid amount",
+                            "Please enter a valid amount."
+                          );
                           return;
                         }
                         completePayment(val);
@@ -2107,12 +2369,16 @@ export default function CategoryScreen({
                     onPress={() => handleSelectCustomer(c)}
                   >
                     <Text style={styles.customerName}>{c.name}</Text>
-                    {!!c.phone && <Text style={styles.customerPhone}>{c.phone}</Text>}
+                    {!!c.phone && (
+                      <Text style={styles.customerPhone}>{c.phone}</Text>
+                    )}
                   </Pressable>
                 ))}
 
               {!customerLoading && customerList.length === 0 && (
-                <Text style={styles.customerEmptyText}>No customers found.</Text>
+                <Text style={styles.customerEmptyText}>
+                  No customers found.
+                </Text>
               )}
             </ScrollView>
 
@@ -2134,7 +2400,10 @@ export default function CategoryScreen({
                 onChangeText={setNewCustomerPhone}
               />
               <Pressable
-                style={[styles.customerSaveButton, savingCustomer && { opacity: 0.7 }]}
+                style={[
+                  styles.customerSaveButton,
+                  savingCustomer && { opacity: 0.7 },
+                ]}
                 onPress={handleCreateCustomer}
                 disabled={savingCustomer}
               >
@@ -2156,8 +2425,6 @@ export default function CategoryScreen({
     </SafeAreaView>
   );
 }
-
-
 
 /* ------------------------ STYLES ------------------------ */
 const styles = StyleSheet.create({
@@ -2347,36 +2614,36 @@ const styles = StyleSheet.create({
     borderColor: "#e5e7eb",
     overflow: "hidden",
   },
-  
+
   categoryImageWrap: {
     height: 90,
-    backgroundColor: "#ffffff",      
+    backgroundColor: "#ffffff",
     justifyContent: "center",
     alignItems: "center",
-    padding: 8,                    
+    padding: 8,
   },
-  
+
   categoryImage: {
     width: "100%",
     height: "100%",
-    resizeMode: "contain",           
+    resizeMode: "contain",
   },
-  
+
   categoryPlaceholder: {
-    width: "70%",                    
+    width: "70%",
     height: "70%",
     backgroundColor: "#f3f4f6",
     borderRadius: 8,
     justifyContent: "center",
     alignItems: "center",
   },
-  
+
   categoryPlaceholderText: {
     color: "#6b7280",
     fontSize: 12,
     fontWeight: "600",
   },
-  
+
   categoryName: {
     paddingHorizontal: 8,
     paddingVertical: 6,
@@ -2385,7 +2652,7 @@ const styles = StyleSheet.create({
     textAlign: "center",
     color: "#111827",
   },
-  
+
   paymentFooter: {
     flexDirection: "row",
     alignItems: "center",

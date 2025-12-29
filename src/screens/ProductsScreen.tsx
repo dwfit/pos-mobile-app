@@ -141,6 +141,96 @@ function normalizePrice(raw: any): number {
   return Number.isNaN(n) ? 0 : n;
 }
 
+const PRICE_TIERS_CACHE_KEY = "pos_price_tiers_v1";
+
+async function loadCachedPriceTiers(): Promise<PriceTier[]> {
+  try {
+    const raw = await AsyncStorage.getItem(PRICE_TIERS_CACHE_KEY);
+    if (!raw) return [];
+
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+
+    return parsed.map((t: any) => ({
+      id: String(t.id),
+      name: String(t.name),
+      code: t.code ?? null,
+      type: t.type ?? null,
+      isActive: t.isActive !== false,
+    })) as PriceTier[];
+  } catch (e) {
+    console.log("LOAD PRICE TIERS CACHE ERR (ProductsScreen)", e);
+    return [];
+  }
+}
+
+async function saveCachedPriceTiers(list: PriceTier[]): Promise<void> {
+  try {
+    const payload = list.map((t) => ({
+      id: t.id,
+      name: t.name,
+      code: t.code ?? null,
+      type: t.type ?? null,
+      isActive: t.isActive !== false,
+    }));
+    await AsyncStorage.setItem(PRICE_TIERS_CACHE_KEY, JSON.stringify(payload));
+  } catch (e) {
+    console.log("SAVE PRICE TIERS CACHE ERR (ProductsScreen)", e);
+  }
+}
+
+// ⚠️ assumes you have getDeviceInfo() in this file OR you can import it.
+// If it lives in CategoryScreen only, move that helper to a shared util and use it here too.
+async function getDeviceInfo(): Promise<{
+  branchId: string | null;
+  brandId: string | null;
+  deviceId: string | null;
+}> {
+  try {
+    const raw = await AsyncStorage.getItem("deviceInfo");
+    if (!raw) return { branchId: null, brandId: null, deviceId: null };
+    const dev = JSON.parse(raw);
+    const branchId = dev.branchId ?? null;
+    const brandId = dev.brandId ?? dev.brand?.id ?? null;
+    const deviceId = dev.id ?? dev.deviceId ?? null;
+    return { branchId, brandId, deviceId };
+  } catch (e) {
+    console.log("getDeviceInfo parse error (ProductsScreen)", e);
+    return { branchId: null, brandId: null, deviceId: null };
+  }
+}
+
+async function refreshPriceTiersFromServer(): Promise<PriceTier[]> {
+  try {
+    const { branchId, brandId } = await getDeviceInfo();
+
+    const params = new URLSearchParams();
+    if (branchId) params.append("branchId", branchId);
+    if (brandId) params.append("brandId", brandId);
+
+    const resp = await get(`/pricing/tiers?${params.toString()}`);
+    const arr = Array.isArray(resp) ? resp : [];
+
+    console.log("📦 PRICE TIERS API (ProductsScreen):", arr);
+
+    const list: PriceTier[] = arr.map((t: any) => ({
+      id: String(t.id),
+      name: String(t.name),
+      code: t.code ?? null,
+      type: t.type ?? null,
+      isActive: t.isActive !== false,
+    }));
+
+    const activeList = list.filter((t) => t.isActive !== false);
+    await saveCachedPriceTiers(activeList);
+    return activeList;
+  } catch (e) {
+    console.log("REFRESH PRICE TIERS ERR (ProductsScreen)", e);
+    throw e;
+  }
+}
+
+
 function calcLineModifierTotal(mods?: CartModifier[]): number {
   if (!mods || !Array.isArray(mods)) return 0;
   return mods.reduce((sum, m) => sum + normalizePrice(m.price), 0);
@@ -366,6 +456,9 @@ export default function ProductsScreen({
   setActiveOrderId,
   online,
 }: any) {
+
+  const isOnline = online ?? true;
+
   const { categoryId, branchName, userName, goBack, reopenFromCallcenter } =
     route.params || {};
 
@@ -451,10 +544,11 @@ export default function ProductsScreen({
 
   // ✅ Hydrate shared tier store (so tier from CategoryScreen is visible here)
   useEffect(() => {
-    hydrateTier().catch(() => {});
+    hydrateTier().catch(() => { });
   }, [hydrateTier]);
 
   /* ------------------------ LOAD DEVICE INFO (brandId/deviceId/branchId) ------------------------ */
+
   useEffect(() => {
     (async () => {
       try {
@@ -665,10 +759,10 @@ export default function ProductsScreen({
                   sizes:
                     Array.isArray(p.sizes) && p.sizes.length > 0
                       ? p.sizes.map((s: any) => ({
-                          id: s.id,
-                          name: s.name,
-                          price: s.price,
-                        }))
+                        id: s.id,
+                        name: s.name,
+                        price: s.price,
+                      }))
                       : [],
                   categoryId: p.categoryId ?? null,
                 }));
@@ -750,7 +844,7 @@ export default function ProductsScreen({
             try {
               const d = JSON.parse(rawDev);
               branchIdFromStorage = d?.branchId ?? d?.branch?.id ?? null;
-            } catch {}
+            } catch { }
           }
         }
 
@@ -817,12 +911,12 @@ export default function ProductsScreen({
             const orderTypesRaw: string[] =
               typeof d.orderTypes === 'string'
                 ? d.orderTypes
-                    .split(',')
-                    .map((s: any) => String(s).trim())
-                    .filter(Boolean)
+                  .split(',')
+                  .map((s: any) => String(s).trim())
+                  .filter(Boolean)
                 : Array.isArray(d.orderTypes)
-                ? d.orderTypes.map((x: any) => String(x))
-                : [];
+                  ? d.orderTypes.map((x: any) => String(x))
+                  : [];
 
             const orderTypes: string[] = orderTypesRaw
               .map((x) => normalizeOrderTypeLabel(x))
@@ -859,6 +953,41 @@ export default function ProductsScreen({
       mounted = false;
     };
   }, []);
+
+  /* ------------------------ SYNC PriceTier ------------------------ */
+  useEffect(() => {
+    let mounted = true;
+
+    (async () => {
+      // 1) local cache first
+      const cached = await loadCachedPriceTiers();
+      if (mounted && cached.length) {
+        console.log("📥 PRICE TIERS from cache (ProductsScreen):", cached.length);
+        setTiers(cached);
+      }
+
+      // 2) if online, refresh from API
+      if (!online) return;
+
+      try {
+        setTierLoading(true);
+        const fresh = await refreshPriceTiersFromServer();
+        if (mounted) {
+          console.log("🌐 PRICE TIERS from server (ProductsScreen):", fresh.length);
+          setTiers(fresh);
+        }
+      } catch (e) {
+        console.log("load price tiers error (ProductsScreen)", e);
+      } finally {
+        if (mounted) setTierLoading(false);
+      }
+    })();
+
+    return () => {
+      mounted = false;
+    };
+  }, [online]);
+
 
   /* ------------------------ SYNC ORDERS CACHE (for OrdersScreen offline) ------------------------ */
   async function syncOrdersCache() {
@@ -1447,14 +1576,14 @@ export default function ProductsScreen({
 
       const discountPayload = appliedDiscount
         ? {
-            kind: appliedDiscount.kind,
-            value: appliedDiscount.value,
-            amount: discountAmount,
-            source: appliedDiscount.source,
-            name: appliedDiscount.name ?? null,
-            configId: appliedDiscount.id ?? null,
-            scope: appliedDiscount.scope ?? null,
-          }
+          kind: appliedDiscount.kind,
+          value: appliedDiscount.value,
+          amount: discountAmount,
+          source: appliedDiscount.source,
+          name: appliedDiscount.name ?? null,
+          configId: appliedDiscount.id ?? null,
+          scope: appliedDiscount.scope ?? null,
+        }
         : null;
 
       const basePayload: any = {
@@ -1478,10 +1607,10 @@ export default function ProductsScreen({
           modifiers:
             i.modifiers && i.modifiers.length > 0
               ? i.modifiers.map((m) => ({
-                  modifierItemId: m.itemId,
-                  price: m.price,
-                  qty: 1,
-                }))
+                modifierItemId: m.itemId,
+                price: m.price,
+                qty: 1,
+              }))
               : [],
         })),
         payments,
@@ -1546,14 +1675,14 @@ export default function ProductsScreen({
     try {
       const discountPayload = appliedDiscount
         ? {
-            kind: appliedDiscount.kind,
-            value: appliedDiscount.value,
-            amount: discountAmount,
-            source: appliedDiscount.source,
-            name: appliedDiscount.name ?? null,
-            configId: appliedDiscount.id ?? null,
-            scope: appliedDiscount.scope ?? null,
-          }
+          kind: appliedDiscount.kind,
+          value: appliedDiscount.value,
+          amount: discountAmount,
+          source: appliedDiscount.source,
+          name: appliedDiscount.name ?? null,
+          configId: appliedDiscount.id ?? null,
+          scope: appliedDiscount.scope ?? null,
+        }
         : null;
 
       const payload: any = {
@@ -1580,10 +1709,10 @@ export default function ProductsScreen({
           modifiers:
             i.modifiers && i.modifiers.length > 0
               ? i.modifiers.map((m) => ({
-                  modifierItemId: m.itemId,
-                  price: m.price,
-                  qty: 1,
-                }))
+                modifierItemId: m.itemId,
+                price: m.price,
+                qty: 1,
+              }))
               : [],
         })),
         payments: [],
@@ -1626,14 +1755,14 @@ export default function ProductsScreen({
 
             const discountPayload = appliedDiscount
               ? {
-                  kind: appliedDiscount.kind,
-                  value: appliedDiscount.value,
-                  amount: discountAmount,
-                  source: appliedDiscount.source,
-                  name: appliedDiscount.name ?? null,
-                  configId: appliedDiscount.id ?? null,
-                  scope: appliedDiscount.scope ?? null,
-                }
+                kind: appliedDiscount.kind,
+                value: appliedDiscount.value,
+                amount: discountAmount,
+                source: appliedDiscount.source,
+                name: appliedDiscount.name ?? null,
+                configId: appliedDiscount.id ?? null,
+                scope: appliedDiscount.scope ?? null,
+              }
               : null;
 
             const payload: any = {
@@ -1660,10 +1789,10 @@ export default function ProductsScreen({
                 modifiers:
                   i.modifiers && i.modifiers.length > 0
                     ? i.modifiers.map((m) => ({
-                        modifierItemId: m.itemId,
-                        price: m.price,
-                        qty: 1,
-                      }))
+                      modifierItemId: m.itemId,
+                      price: m.price,
+                      qty: 1,
+                    }))
                     : [],
               })),
               payments: [],
@@ -1714,11 +1843,11 @@ export default function ProductsScreen({
 
       const list: PriceTier[] = Array.isArray(raw)
         ? raw
-            .filter((t: any) => t && t.isActive !== false)
-            .map((t: any) => ({
-              id: String(t.id),
-              name: String(t.name ?? t.code ?? 'Tier'),
-            }))
+          .filter((t: any) => t && t.isActive !== false)
+          .map((t: any) => ({
+            id: String(t.id),
+            name: String(t.name ?? t.code ?? 'Tier'),
+          }))
         : [];
 
       setTiers(list);
@@ -1953,11 +2082,11 @@ export default function ProductsScreen({
                 <Text style={styles.summaryLabel}>
                   Discount
                   {appliedDiscount?.source === 'PREDEFINED' &&
-                  appliedDiscount.name
+                    appliedDiscount.name
                     ? ` (${appliedDiscount.name})`
                     : appliedDiscount?.kind === 'PERCENT'
-                    ? ` (${appliedDiscount.value.toFixed(2)}%)`
-                    : ''}
+                      ? ` (${appliedDiscount.value.toFixed(2)}%)`
+                      : ''}
                 </Text>
                 <Text style={styles.summaryValue}>
                   -{toMoney(discountAmount)}
@@ -2769,140 +2898,140 @@ export default function ProductsScreen({
       </Modal>
 
       {/* ------------------------ PRICE TIER MODAL ------------------------ */}
-      
-<Modal
-  visible={tierModalVisible}
-  transparent
-  animationType="fade"
-  onRequestClose={() => setTierModalVisible(false)}
->
-  <View style={styles.tierBackdrop}>
-    <View style={styles.tierCard}>
-      {/* Header */}
-      <View style={styles.tierHeader}>
-        <View style={styles.tierTitleWrap}>
-          <Text style={styles.tierTitle}>Select price tier</Text>
-          <Text style={styles.tierSub}>
-            Choose a tier to apply pricing overrides
-          </Text>
-        </View>
 
-        <Pressable
-          onPress={() => setTierModalVisible(false)}
-          style={({ pressed }) => [
-            styles.tierCloseBtn,
-            pressed && { opacity: 0.9 },
-          ]}
-        >
-          <Text style={styles.tierCloseText}>Close</Text>
-        </Pressable>
-      </View>
-
-      {/* Body */}
-      {tierLoading ? (
-        <View style={{ paddingVertical: 18, alignItems: 'center' }}>
-          <ActivityIndicator />
-          <Text style={styles.tierLoadingText}>Loading tiers…</Text>
-        </View>
-      ) : (
-        <ScrollView style={styles.tierList}>
-          {/* Default / Remove tier */}
-          <Pressable
-            onPress={() => applyTier(null)}
-            style={({ pressed }) => [
-              styles.tierRow,
-              !activeTier && styles.tierRowSelected,
-              pressed && styles.tierRowPressed,
-            ]}
-          >
-            <View style={styles.tierRowLeft}>
-              <Text style={styles.tierRowText}>Default pricing</Text>
-              <Text style={styles.tierRowCode}>Remove tier</Text>
-            </View>
-
-            {!activeTier ? (
-              <View style={styles.tierCheck}>
-                <Text style={styles.tierCheckText}>✓</Text>
+      <Modal
+        visible={tierModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setTierModalVisible(false)}
+      >
+        <View style={styles.tierBackdrop}>
+          <View style={styles.tierCard}>
+            {/* Header */}
+            <View style={styles.tierHeader}>
+              <View style={styles.tierTitleWrap}>
+                <Text style={styles.tierTitle}>Select price tier</Text>
+                <Text style={styles.tierSub}>
+                  Choose a tier to apply pricing overrides
+                </Text>
               </View>
-            ) : null}
-          </Pressable>
 
-          {/* Tiers */}
-          {tiers.map((t) => {
-            const isSelected = activeTier?.id === t.id;
-
-            return (
               <Pressable
-                key={t.id}
-                onPress={() => applyTier(t)}
+                onPress={() => setTierModalVisible(false)}
                 style={({ pressed }) => [
-                  styles.tierRow,
-                  isSelected && styles.tierRowSelected,
-                  pressed && styles.tierRowPressed,
+                  styles.tierCloseBtn,
+                  pressed && { opacity: 0.9 },
                 ]}
               >
-                <View style={styles.tierRowLeft}>
-                  <Text style={styles.tierRowText}>{t.name}</Text>
-                  <Text style={styles.tierRowCode}>
-                    {(t.code || '').toUpperCase()}
-                    {t.type ? ` • ${String(t.type).toUpperCase()}` : ''}
-                  </Text>
-                </View>
-
-                {isSelected ? (
-                  <View style={styles.tierCheck}>
-                    <Text style={styles.tierCheckText}>✓</Text>
-                  </View>
-                ) : null}
+                <Text style={styles.tierCloseText}>Close</Text>
               </Pressable>
-            );
-          })}
+            </View>
 
-          {!tiers.length ? (
-            <Text
-              style={{
-                color: '#6B7280',
-                paddingHorizontal: 16,
-                paddingVertical: 10,
-              }}
-            >
-              No active tiers found.
-            </Text>
-          ) : null}
-        </ScrollView>
-      )}
+            {/* Body */}
+            {tierLoading ? (
+              <View style={{ paddingVertical: 18, alignItems: 'center' }}>
+                <ActivityIndicator />
+                <Text style={styles.tierLoadingText}>Loading tiers…</Text>
+              </View>
+            ) : (
+              <ScrollView style={styles.tierList}>
+                {/* Default / Remove tier */}
+                <Pressable
+                  onPress={() => applyTier(null)}
+                  style={({ pressed }) => [
+                    styles.tierRow,
+                    !activeTier && styles.tierRowSelected,
+                    pressed && styles.tierRowPressed,
+                  ]}
+                >
+                  <View style={styles.tierRowLeft}>
+                    <Text style={styles.tierRowText}>Default pricing</Text>
+                    <Text style={styles.tierRowCode}>Remove tier</Text>
+                  </View>
 
-      {/* Footer */}
-      <View style={styles.tierFooter}>
-        <Pressable
-          onPress={() => setTierModalVisible(false)}
-          style={({ pressed }) => [
-            styles.tierBtn,
-            styles.tierBtnGhost,
-            pressed && { opacity: 0.9 },
-          ]}
-        >
-          <Text style={[styles.tierBtnText, styles.tierBtnTextGhost]}>
-            Cancel
-          </Text>
-        </Pressable>
+                  {!activeTier ? (
+                    <View style={styles.tierCheck}>
+                      <Text style={styles.tierCheckText}>✓</Text>
+                    </View>
+                  ) : null}
+                </Pressable>
 
-        <Pressable
-          onPress={() => setTierModalVisible(false)}
-          style={({ pressed }) => [
-            styles.tierBtn,
-            styles.tierBtnPrimary,
-            pressed && { opacity: 0.9 },
-          ]}
-        >
-          <Text style={[styles.tierBtnText, styles.tierBtnTextPrimary]}>
-            Done
-          </Text>
-        </Pressable>
-      </View>
-    </View>
-  </View>
-</Modal>
+                {/* Tiers */}
+                {tiers.map((t) => {
+                  const isSelected = activeTier?.id === t.id;
+
+                  return (
+                    <Pressable
+                      key={t.id}
+                      onPress={() => applyTier(t)}
+                      style={({ pressed }) => [
+                        styles.tierRow,
+                        isSelected && styles.tierRowSelected,
+                        pressed && styles.tierRowPressed,
+                      ]}
+                    >
+                      <View style={styles.tierRowLeft}>
+                        <Text style={styles.tierRowText}>{t.name}</Text>
+                        <Text style={styles.tierRowCode}>
+                          {(t.code || '').toUpperCase()}
+                          {t.type ? ` • ${String(t.type).toUpperCase()}` : ''}
+                        </Text>
+                      </View>
+
+                      {isSelected ? (
+                        <View style={styles.tierCheck}>
+                          <Text style={styles.tierCheckText}>✓</Text>
+                        </View>
+                      ) : null}
+                    </Pressable>
+                  );
+                })}
+
+                {!tiers.length ? (
+                  <Text
+                    style={{
+                      color: '#6B7280',
+                      paddingHorizontal: 16,
+                      paddingVertical: 10,
+                    }}
+                  >
+                    No active tiers found.
+                  </Text>
+                ) : null}
+              </ScrollView>
+            )}
+
+            {/* Footer */}
+            <View style={styles.tierFooter}>
+              <Pressable
+                onPress={() => setTierModalVisible(false)}
+                style={({ pressed }) => [
+                  styles.tierBtn,
+                  styles.tierBtnGhost,
+                  pressed && { opacity: 0.9 },
+                ]}
+              >
+                <Text style={[styles.tierBtnText, styles.tierBtnTextGhost]}>
+                  Cancel
+                </Text>
+              </Pressable>
+
+              <Pressable
+                onPress={() => setTierModalVisible(false)}
+                style={({ pressed }) => [
+                  styles.tierBtn,
+                  styles.tierBtnPrimary,
+                  pressed && { opacity: 0.9 },
+                ]}
+              >
+                <Text style={[styles.tierBtnText, styles.tierBtnTextPrimary]}>
+                  Done
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
     </SafeAreaView>
   );
