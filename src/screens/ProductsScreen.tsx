@@ -23,6 +23,7 @@ import {
 } from '../database/ordersLocal';
 import { getTierPricingForIds } from '../services/tierPricing';
 import { usePriceTierStore, type PriceTier } from '../store/priceTierStore';
+import { useOrderTypeStore } from "../store/orderTypeStore";
 
 type ProductSize = {
   id: string;
@@ -478,7 +479,8 @@ export default function ProductsScreen({
   const [search, setSearch] = useState('');
   const [sizeModalVisible, setSizeModalVisible] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
-  const [orderType, setOrderType] = useState<string | null>(null);
+  const orderType = useOrderTypeStore((s) => s.orderType);
+  const setOrderType = useOrderTypeStore((s) => s.setOrderType);
   const [orderTypeModalVisible, setOrderTypeModalVisible] = useState(false);
 
   // Payment
@@ -1950,7 +1952,6 @@ export default function ProductsScreen({
     { label: 'TAKE AWAY', value: 'TAKE_AWAY' },
     { label: 'DELIVERY', value: 'DELIVERY' },
     { label: 'DRIVE THRU', value: 'DRIVE_THRU' },
-    { label: 'B2B', value: 'B2B' },
   ];
 
   /* ------------------------ RENDER ------------------------ */

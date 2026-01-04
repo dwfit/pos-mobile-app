@@ -35,6 +35,7 @@ import { syncMenu } from "../sync/menuSync";
 import { getTierPricingForIds } from "../services/tierPricing";
 import { loadPriceTiersWithSync } from "../sync/priceTierSync";
 import { usePriceTierStore, type PriceTier } from "../store/priceTierStore";
+import { useOrderTypeStore } from "../store/orderTypeStore";
 
 type Category = {
   id: string;
@@ -481,7 +482,8 @@ export default function CategoryScreen({
   const [deviceId, setDeviceId] = useState<string | null>(null);
   const [vatRate, setVatRate] = useState<number>(15);
   const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([]);
-  const [orderType, setOrderType] = useState<string | null>(null);
+  const orderType = useOrderTypeStore((s) => s.orderType);
+  const setOrderType = useOrderTypeStore((s) => s.setOrderType);
   const [voidLoading, setVoidLoading] = useState(false);
   const [ordersBadge, setOrdersBadge] = useState(0);
   const [syncing, setSyncing] = useState(false);
