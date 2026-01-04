@@ -90,6 +90,20 @@ type AppliedDiscount = {
   label?: string | null;
 };
 
+type DiscountConfig = {
+  id: string;
+  name: string;
+  mode: 'AMOUNT' | 'PERCENT';
+  value: number;
+  scope?: 'ORDER' | 'ITEM';
+  branchIds?: string[];
+  categoryIds?: string[];
+  productIds?: string[];
+  productSizeIds?: string[];
+  orderTypes?: string[];
+  applyAllBranches?: boolean;
+};
+
 const PURPLE = "#6d28d9";
 const BLACK = "#000000";
 const DISCOUNT_STORAGE_KEY = "pos_applied_discount";
@@ -363,6 +377,19 @@ function toLocalOrder(o: any): LocalOrder {
   };
 }
 
+function normalizeOrderTypeLabel(label: string | null | undefined): string | null {
+  if (!label) return null;
+  const raw = String(label).trim().toLowerCase().replace(/\s+/g, " ");
+  if (raw.includes("dine")) return "DINE_IN";
+  if (raw.includes("pick") || raw.includes("take")) return "TAKE_AWAY";
+  if (raw.includes("drive")) return "DRIVE_THRU";
+  if (raw.includes("deliver")) return "DELIVERY";
+  if (raw === "b2b" || raw.includes("corporate")) return "B2B";
+  const fallback = String(label).trim().toUpperCase().replace(/\s+/g, "_");
+  if (fallback === "PICK_UP") return "TAKE_AWAY";
+  return fallback;
+}
+
 /* =========================
    ✅ Tier pricing helpers
    ========================= */
@@ -444,39 +471,30 @@ export default function CategoryScreen({
   online,
 }: any) {
   const { branchName, userName } = route?.params || {};
-
   const [categories, setCategories] = useState<Category[]>([]);
   const [filtered, setFiltered] = useState<Category[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
-
   const [branchId, setBranchId] = useState<string | null>(null);
   const [brandId, setBrandId] = useState<string | null>(null);
   const [deviceId, setDeviceId] = useState<string | null>(null);
-
   const [vatRate, setVatRate] = useState<number>(15);
   const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([]);
-
   const [orderType, setOrderType] = useState<string | null>(null);
-
   const [voidLoading, setVoidLoading] = useState(false);
   const [ordersBadge, setOrdersBadge] = useState(0);
   const [syncing, setSyncing] = useState(false);
-
   const [payments, setPayments] = useState<PaymentEntry[]>([]);
   const [paymentModalVisible, setPaymentModalVisible] = useState(false);
   const [selectedPaymentMethodId, setSelectedPaymentMethodId] =
     useState<string | null>(null);
   const [paying, setPaying] = useState(false);
   const [discountValue, setDiscountValue] = useState<string>("0");
-
   const [appliedDiscount, setAppliedDiscount] =
     useState<AppliedDiscount | null>(null);
-
   const [showCustomAmount, setShowCustomAmount] = useState(false);
   const [customAmountInput, setCustomAmountInput] = useState("");
-
   const [customerModalVisible, setCustomerModalVisible] = useState(false);
   const [customerSearch, setCustomerSearch] = useState("");
   const [customerList, setCustomerList] = useState<CustomerSummary[]>([]);
@@ -486,10 +504,27 @@ export default function CategoryScreen({
   const [newCustomerName, setNewCustomerName] = useState("");
   const [newCustomerPhone, setNewCustomerPhone] = useState("");
   const [savingCustomer, setSavingCustomer] = useState(false);
-
   const [orderTypeModalVisible, setOrderTypeModalVisible] = useState(false);
-
   const readOnlyCart = false;
+  const [discountModeModalVisible, setDiscountModeModalVisible] = useState(false);
+  const [discountInputModalVisible, setDiscountInputModalVisible] = useState(false);
+  const [discountPresetModalVisible, setDiscountPresetModalVisible] = useState(false);
+  const [discountInputMode, setDiscountInputMode] = useState<"AMOUNT" | "PERCENT" | null>(null);
+  const [discountInputValue, setDiscountInputValue] = useState("");
+  const [discountConfigs, setDiscountConfigs] = useState<DiscountConfig[]>([]);
+  const [userPermissions, setUserPermissions] = useState<string[]>([]);
+  // 🔐 Permission helpers (must use component state)
+  const hasPermission = (code: string) =>
+    Array.isArray(userPermissions) && userPermissions.includes(code);
+  const canUseOpenDiscount =
+    hasPermission("pos.discounts.open.apply") ||
+    hasPermission("pos.discount.open.apply") ||
+    hasPermission("APPLY_OPEN_DISCOUNTS");
+  const canUsePredefinedDiscount =
+    hasPermission("pos.discounts.predefined.apply") ||
+    hasPermission("pos.discount.predefined.apply") ||
+    hasPermission("APPLY_PREDEFINED_DISCOUNTS");
+  const canUseAnyDiscount = canUseOpenDiscount || canUsePredefinedDiscount;
 
   /* =========================
      ✅ Price Tier UI state
@@ -587,6 +622,44 @@ export default function CategoryScreen({
       console.log("syncOrdersCache error (CategoryScreen)", e);
     }
   }
+
+  /* ------------------------ Discount ------------------------ */
+  // Load POS user permissions (for discount permissions)
+  useEffect(() => {
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem("pos_user");
+        if (!raw) {
+          setUserPermissions([]);
+          return;
+        }
+        const u = JSON.parse(raw);
+        const perms: string[] = Array.isArray(u?.permissions) ? u.permissions : [];
+        setUserPermissions(perms);
+      } catch (e) {
+        console.log("pos_user permissions load error (CategoryScreen)", e);
+        setUserPermissions([]);
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        if (appliedDiscount) {
+          await AsyncStorage.setItem(
+            DISCOUNT_STORAGE_KEY,
+            JSON.stringify(appliedDiscount)
+          );
+        } else {
+          await AsyncStorage.removeItem(DISCOUNT_STORAGE_KEY);
+        }
+      } catch (e) {
+        console.log("SAVE DISCOUNT ERR (CategoryScreen)", e);
+      }
+    })();
+  }, [appliedDiscount]);
+
 
   /* ------------------------ LOAD CATEGORIES (SQLite-first + background sync) ------------------------ */
   useEffect(() => {
@@ -708,6 +781,190 @@ export default function CategoryScreen({
     };
   }, [online, branchId]);
 
+  /* ------------------------ Discount ------------------------ */
+  // Determine which discounts can be used on this order
+  function isDiscountEligibleForCart(discount: DiscountConfig, cartItems: CartItem[]): boolean {
+    const productIds = discount.productIds || [];
+    const categoryIds = discount.categoryIds || [];
+    const productSizeIds = discount.productSizeIds || [];
+    const allowedOrderTypes = (discount.orderTypes || [])
+      .map((v) => normalizeOrderTypeLabel(String(v)))
+      .filter((v): v is string => !!v);
+
+    // order type check
+    if (allowedOrderTypes.length > 0) {
+      const current = normalizeOrderTypeLabel(orderType);
+      if (!current || !allowedOrderTypes.includes(current)) return false;
+    }
+
+    // branch check
+    if (branchId) {
+      const branchIds = discount.branchIds || [];
+      if (!discount.applyAllBranches && branchIds.length > 0) {
+        const match = branchIds.includes(branchId);
+        if (!match) return false;
+      }
+    }
+
+    const hasAssignments =
+      productIds.length > 0 ||
+      categoryIds.length > 0 ||
+      productSizeIds.length > 0;
+
+    // If discount has no assignments, treat as generic ORDER-level discount
+    if (!hasAssignments) {
+      return cartItems.length > 0;
+    }
+
+    // CategoryScreen doesn't know full product catalog, so we only check
+    // productId / sizeId directly from cart
+    if (!cartItems.length) return false;
+
+    const cartProductIds = new Set(cartItems.map((c) => c.productId));
+    const cartSizeIds = new Set(
+      cartItems.map((c) => c.sizeId).filter((id): id is string => !!id)
+    );
+
+    const productMatch =
+      productIds.length > 0 &&
+      productIds.some((pid) => cartProductIds.has(pid));
+
+    const sizeMatch =
+      productSizeIds.length > 0 &&
+      productSizeIds.some((sid) => cartSizeIds.has(sid));
+
+    // NOTE: we cannot safely compute categoryMatch here, since we don't
+    // have product.categoryId in CategoryScreen. If you really need it,
+    // we can add a small SQLite lookup later.
+    return productMatch || sizeMatch || (!productMatch && !sizeMatch && cartItems.length > 0);
+  }
+
+  const applicableDiscounts: DiscountConfig[] = React.useMemo(() => {
+    const items: CartItem[] = Array.isArray(cart) ? (cart as CartItem[]) : [];
+    return discountConfigs.filter((d) => isDiscountEligibleForCart(d, items));
+  }, [discountConfigs, cart, orderType, branchId]);
+
+  function openDiscountMenu() {
+    if (readOnlyCart) return;
+
+    const items: CartItem[] = Array.isArray(cart) ? (cart as CartItem[]) : [];
+    if (!items.length) {
+      Alert.alert("Empty cart", "Add items to the order before discount.");
+      return;
+    }
+
+    if (!canUseAnyDiscount) {
+      Alert.alert(
+        "No permission",
+        "You are not allowed to apply discounts."
+      );
+      return;
+    }
+
+    setDiscountModeModalVisible(true);
+  }
+
+  function openDiscountInput(mode: "AMOUNT" | "PERCENT") {
+    if (readOnlyCart) return;
+
+    if (!canUseOpenDiscount) {
+      Alert.alert(
+        "No permission",
+        "You are not allowed to apply open discounts."
+      );
+      return;
+    }
+
+    setDiscountModeModalVisible(false);
+    setDiscountInputMode(mode);
+    setDiscountInputValue("");
+    setDiscountInputModalVisible(true);
+  }
+
+  function applyDiscountInput() {
+    if (readOnlyCart) return;
+    if (!discountInputMode) return;
+
+    const raw = parseFloat(discountInputValue || "0");
+    if (!raw || raw <= 0) {
+      Alert.alert("Invalid value", "Please enter a positive value.");
+      return;
+    }
+
+    setAppliedDiscount({
+      kind: discountInputMode,
+      value: raw,
+      source: "OPEN",
+      label:
+        discountInputMode === "PERCENT"
+          ? `${raw}%`
+          : `${toMoney(raw)} SAR`,
+    });
+
+    setDiscountInputModalVisible(false);
+  }
+
+  function openPredefinedDiscount() {
+    if (readOnlyCart) return;
+
+    if (!canUsePredefinedDiscount) {
+      Alert.alert(
+        "No permission",
+        "You are not allowed to apply predefined discounts."
+      );
+      return;
+    }
+
+    setDiscountModeModalVisible(false);
+
+    const items: CartItem[] = Array.isArray(cart) ? (cart as CartItem[]) : [];
+    if (!items.length) {
+      Alert.alert("Empty cart", "Add items to the order before discount.");
+      return;
+    }
+
+    if (!applicableDiscounts.length) {
+      Alert.alert(
+        "No discounts",
+        "No predefined discounts are applicable for this branch/cart."
+      );
+      return;
+    }
+
+    setDiscountPresetModalVisible(true);
+  }
+
+  function applyPredefinedDiscount(cfg: DiscountConfig) {
+    const items: CartItem[] = Array.isArray(cart) ? (cart as CartItem[]) : [];
+    if (!isDiscountEligibleForCart(cfg, items)) {
+      Alert.alert(
+        "Not applicable",
+        "This discount is not allowed for current items or order type."
+      );
+      return;
+    }
+
+    setAppliedDiscount({
+      kind: cfg.mode,
+      value: cfg.value,
+      source: "PREDEFINED",
+      name: cfg.name,
+      id: cfg.id,
+      label:
+        cfg.mode === "PERCENT"
+          ? `${cfg.value}%`
+          : `${toMoney(cfg.value)} SAR`,
+    });
+
+    setDiscountPresetModalVisible(false);
+  }
+
+  function clearDiscount() {
+    setAppliedDiscount(null);
+  }
+
+
+
   /* ------------------------ MANUAL SYNC BUTTON HANDLER ------------------------ */
   async function handleSyncPress() {
     if (!online) {
@@ -826,8 +1083,6 @@ export default function CategoryScreen({
     (async () => {
       try {
         setTierLoading(true);
-
-        // ensure branch/brand are populated
         try {
           const info = await getDeviceInfo();
           if (info.branchId && !branchId) setBranchId(info.branchId);
@@ -849,13 +1104,10 @@ export default function CategoryScreen({
             id: t.id,
             name: t.name,
             code: t.code ?? null,
-            // optional: type if you store it
-            type: (t as any).type ?? null,
+            type: (t as any).type ?? null, // optional: type if you store it
           }));
 
         setTiers(list);
-
-        // if active tier no longer exists, clear it and restore prices
         if (activeTier?.id && !list.some((t) => t.id === activeTier.id)) {
           await setActiveTier(null);
           setCart((prev: CartItem[]) =>
@@ -1115,9 +1367,7 @@ export default function CategoryScreen({
     if (readOnlyCart) return;
 
     setTierModalVisible(true);
-
-    // 🔄 refresh from server when modal opens (if online)
-    if (online) {
+    if (online) { // 🔄 refresh from server when modal opens (if online)
       try {
         setTierLoading(true);
         const fresh = await refreshPriceTiersFromServer();
@@ -1130,11 +1380,9 @@ export default function CategoryScreen({
     }
   }
 
-
   async function applyTier(tier: PriceTier | null) {
     try {
-      // 1) save selected tier in store (incl. code for header display)
-      setActiveTier(
+      setActiveTier( // 1) save selected tier in store (incl. code for header display)
         tier
           ? {
             id: tier.id,
@@ -1143,18 +1391,14 @@ export default function CategoryScreen({
           }
           : null
       );
-
-      // 2) clear tier => restore original prices
-      if (!tier) {
+      if (!tier) { // 2) clear tier => restore original prices
         setCart((prev: CartItem[]) =>
           clearTierFromCartLocal(Array.isArray(prev) ? prev : [])
         );
         setTierModalVisible(false);
         return;
       }
-
-      // 3) apply tier pricing only for IDs in cart
-      const items = Array.isArray(cartItems) ? cartItems : [];
+      const items = Array.isArray(cartItems) ? cartItems : []; // 3) apply tier pricing only for IDs in cart
       const { productSizeIds, modifierItemIds } = collectTierIdsFromCart(items);
 
       if (!productSizeIds.length && !modifierItemIds.length) {
@@ -1167,9 +1411,7 @@ export default function CategoryScreen({
         productSizeIds,
         modifierItemIds,
       });
-
-      // 4) update cart prices locally
-      setCart((prev: CartItem[]) => {
+      setCart((prev: CartItem[]) => { // 4) update cart prices locally
         const arr = Array.isArray(prev) ? prev : [];
         return applyTierToCartLocal(
           arr,
@@ -1287,10 +1529,7 @@ export default function CategoryScreen({
         vatAmount,
         total: cartTotal,
         orderType,
-
-        // ✅ store which tier used (optional but useful)
-        priceTierId: activeTier?.id ?? null,
-
+        priceTierId: activeTier?.id ?? null, // ✅ store which tier used (optional but useful)
         items: cartItems.map((i) => ({
           productId: i.productId,
           productName: i.productName,
@@ -1436,10 +1675,7 @@ export default function CategoryScreen({
         vatAmount,
         total: cartTotal,
         status: "ACTIVE",
-
-        // ✅ tier info
-        priceTierId: activeTier?.id ?? null,
-
+        priceTierId: activeTier?.id ?? null, // ✅ tier info
         items: items.map((i) => ({
           productId: i.productId,
           productName: i.productName,
@@ -1552,10 +1788,7 @@ export default function CategoryScreen({
               subtotalEx,
               vatAmount,
               total: cartTotal,
-
-              // ✅ tier info
-              priceTierId: activeTier?.id ?? null,
-
+              priceTierId: activeTier?.id ?? null, // ✅ tier info
               items: items.map((i) => ({
                 productId: i.productId,
                 productName: i.productName,
@@ -1850,6 +2083,7 @@ export default function CategoryScreen({
               const isVoid = label === "Void";
               const isSync = label === "Sync";
               const isTier = label === "Price Tag";
+              const isDiscount = label === "Discount";
 
               let onPress: () => void | Promise<void> = () =>
                 console.log(label.toUpperCase(), "pressed");
@@ -1857,9 +2091,12 @@ export default function CategoryScreen({
               if (isVoid) onPress = handleVoidPress;
               else if (isSync) onPress = handleSyncPress;
               else if (isTier) onPress = openTierModal;
+              else if (isDiscount) onPress = openDiscountMenu; // 👈 your discount modal opener
 
               const disabled =
-                (isVoid && voidLoading) || (isSync && syncing);
+                (isVoid && voidLoading) ||
+                (isSync && syncing) ||
+                (isDiscount && (readOnlyCart || !canUseAnyDiscount)); // optional permission check
 
               return (
                 <Pressable
@@ -1883,6 +2120,7 @@ export default function CategoryScreen({
               );
             })}
           </View>
+
 
           <View style={styles.searchBox}>
             <TextInput
@@ -2422,6 +2660,226 @@ export default function CategoryScreen({
           </View>
         </View>
       </Modal>
+      {/* ------------------------ DISCOUNT MODALS ------------------------ */}
+      {/* Discount Mode */}
+      <Modal
+        visible={discountModeModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setDiscountModeModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.paymentCard}>
+            <Text style={styles.modalTitle}>Discount</Text>
+            <Text style={{ fontSize: 13, color: "#6b7280", marginBottom: 10 }}>
+              Choose discount type
+            </Text>
+
+            <View style={{ gap: 10 }}>
+              <Pressable
+                onPress={() => openDiscountInput("AMOUNT")}
+                disabled={readOnlyCart || !canUseOpenDiscount}
+                style={{
+                  paddingVertical: 12,
+                  paddingHorizontal: 12,
+                  borderRadius: 12,
+                  backgroundColor: canUseOpenDiscount ? "#111827" : "#e5e7eb",
+                }}
+              >
+                <Text
+                  style={{
+                    color: canUseOpenDiscount ? "#ffffff" : "#9ca3af",
+                    fontWeight: "800",
+                    fontSize: 13,
+                  }}
+                >
+                  OPEN AMOUNT
+                </Text>
+              </Pressable>
+
+              <Pressable
+                onPress={() => openDiscountInput("PERCENT")}
+                disabled={readOnlyCart || !canUseOpenDiscount}
+                style={{
+                  paddingVertical: 12,
+                  paddingHorizontal: 12,
+                  borderRadius: 12,
+                  backgroundColor: canUseOpenDiscount ? "#111827" : "#e5e7eb",
+                }}
+              >
+                <Text
+                  style={{
+                    color: canUseOpenDiscount ? "#ffffff" : "#9ca3af",
+                    fontWeight: "800",
+                    fontSize: 13,
+                  }}
+                >
+                  OPEN PERCENT
+                </Text>
+              </Pressable>
+
+              <Pressable
+                onPress={openPredefinedDiscount}
+                disabled={readOnlyCart || !canUsePredefinedDiscount}
+                style={{
+                  paddingVertical: 12,
+                  paddingHorizontal: 12,
+                  borderRadius: 12,
+                  backgroundColor: canUsePredefinedDiscount
+                    ? "#111827"
+                    : "#e5e7eb",
+                }}
+              >
+                <Text
+                  style={{
+                    color: canUsePredefinedDiscount ? "#ffffff" : "#9ca3af",
+                    fontWeight: "800",
+                    fontSize: 13,
+                  }}
+                >
+                  PREDEFINED DISCOUNTS
+                </Text>
+              </Pressable>
+            </View>
+
+            <Pressable
+              style={[styles.modalClose, { marginTop: 16 }]}
+              onPress={() => setDiscountModeModalVisible(false)}
+            >
+              <Text style={styles.modalCloseText}>Close</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Discount Input (open amount/percent) */}
+      <Modal
+        visible={discountInputModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setDiscountInputModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.paymentCard}>
+            <Text style={styles.modalTitle}>
+              {discountInputMode === "PERCENT"
+                ? "Discount Percent"
+                : "Discount Amount"}
+            </Text>
+            <Text style={{ fontSize: 13, color: "#6b7280", marginBottom: 10 }}>
+              Enter {discountInputMode === "PERCENT" ? "%" : "amount"} value
+            </Text>
+
+            <TextInput
+              value={discountInputValue}
+              onChangeText={setDiscountInputValue}
+              keyboardType="numeric"
+              editable={!readOnlyCart}
+              placeholder={
+                discountInputMode === "PERCENT" ? "e.g. 10" : "e.g. 5"
+              }
+              placeholderTextColor="#9ca3af"
+              style={{
+                borderWidth: 1,
+                borderColor: "#d1d5db",
+                borderRadius: 12,
+                paddingHorizontal: 12,
+                paddingVertical: 10,
+                fontSize: 14,
+                color: "#111827",
+                backgroundColor: "#f9fafb",
+              }}
+            />
+
+            <Pressable
+              onPress={applyDiscountInput}
+              disabled={readOnlyCart}
+              style={{
+                marginTop: 12,
+                paddingVertical: 12,
+                borderRadius: 12,
+                backgroundColor: "#111827",
+                alignItems: "center",
+              }}
+            >
+              <Text style={{ color: "#fff", fontWeight: "800" }}>APPLY</Text>
+            </Pressable>
+
+            <Pressable
+              style={[styles.modalClose, { marginTop: 12 }]}
+              onPress={() => setDiscountInputModalVisible(false)}
+            >
+              <Text style={styles.modalCloseText}>Close</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Discount Presets */}
+      <Modal
+        visible={discountPresetModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setDiscountPresetModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.paymentCard}>
+            <Text style={styles.modalTitle}>Predefined Discounts</Text>
+            <Text style={{ fontSize: 13, color: "#6b7280", marginBottom: 10 }}>
+              Select an applicable discount
+            </Text>
+
+            <ScrollView style={{ maxHeight: 320 }}>
+              {applicableDiscounts.map((d) => (
+                <Pressable
+                  key={d.id}
+                  onPress={() => applyPredefinedDiscount(d)}
+                  disabled={readOnlyCart}
+                  style={{
+                    paddingVertical: 12,
+                    paddingHorizontal: 12,
+                    borderRadius: 12,
+                    borderWidth: 1,
+                    borderColor: "#e5e7eb",
+                    backgroundColor: "#ffffff",
+                    marginBottom: 8,
+                  }}
+                >
+                  <Text style={{ fontWeight: "900", color: "#111827" }}>
+                    {d.name}
+                  </Text>
+                  <Text
+                    style={{
+                      fontSize: 12,
+                      color: "#6b7280",
+                      marginTop: 4,
+                    }}
+                  >
+                    {d.mode === "PERCENT"
+                      ? `${d.value}%`
+                      : `${toMoney(d.value)}`}
+                    {d.scope ? ` • ${d.scope}` : ""}
+                  </Text>
+                </Pressable>
+              ))}
+
+              {applicableDiscounts.length === 0 && (
+                <Text style={{ fontSize: 12, color: "#6b7280" }}>
+                  No applicable discounts.
+                </Text>
+              )}
+            </ScrollView>
+
+            <Pressable
+              style={[styles.modalClose, { marginTop: 12 }]}
+              onPress={() => setDiscountPresetModalVisible(false)}
+            >
+              <Text style={styles.modalCloseText}>Close</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+
     </SafeAreaView>
   );
 }
@@ -2807,8 +3265,8 @@ const styles = StyleSheet.create({
   customerSaveText: { color: "#ffffff", fontSize: 13, fontWeight: "600" },
   removeDiscountText: { marginTop: 4, fontSize: 12, color: "#b91c1c", textAlign: "right" },
 
-  // ✅ tier modal styles
-  tierBackdrop: {
+
+  tierBackdrop: { // ✅ tier modal styles
     flex: 1,
     backgroundColor: "rgba(17, 24, 39, 0.45)", // slate-900/45
     justifyContent: "center",

@@ -1927,8 +1927,7 @@ export default function ProductsScreen({
       visible: true,
       onPress: async () => {
         if (readOnlyCart) return;
-        // ✅ Open modal first (no white screen) and show globally active tier
-        setTierModalVisible(true);
+        setTierModalVisible(true); // ✅ Open modal first (no white screen) and show globally active tier
         await loadTiers();
       },
     },
