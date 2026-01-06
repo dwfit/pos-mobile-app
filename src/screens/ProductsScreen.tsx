@@ -24,6 +24,7 @@ import {
 import { getTierPricingForIds } from '../services/tierPricing';
 import { usePriceTierStore, type PriceTier } from '../store/priceTierStore';
 import { useOrderTypeStore } from "../store/orderTypeStore";
+import { MaterialIcons } from "@expo/vector-icons";
 
 
 type ProductSize = {
@@ -638,7 +639,7 @@ export default function ProductsScreen({
 
     apply();
   }, [activeTier, cart]);
-  
+
   /* ------------------------ LOAD DEVICE INFO (brandId/deviceId/branchId) ------------------------ */
 
   useEffect(() => {
@@ -3137,35 +3138,75 @@ export default function ProductsScreen({
           />
 
           <View style={styles.homeMenuCard}>
-            {/* 1) OPEN / CLOSE TILL – DYNAMIC TEXT */}
-            <Pressable
-              style={styles.homeMenuItem}
-              onPress={handleOpenOrCloseTill}
-            >
+            {/* 1) OPEN / CLOSE TILL – DYNAMIC */}
+            <Pressable style={styles.homeMenuItem} onPress={handleOpenOrCloseTill}>
+              <MaterialIcons
+                name={tillOpen ? "lock" : "lock-open"}
+                size={20}
+                color="#111827"
+                style={{ marginRight: 10 }}
+              />
               <Text style={styles.homeMenuItemText}>
                 {tillOpen ? "Close Till" : "Open Till"}
               </Text>
             </Pressable>
 
-            {/* 2) other static items */}
-            <Pressable style={styles.homeMenuItem} onPress={() => {/* Drawer ops */ }}>
+            {/* 2) Drawer Ops */}
+            <Pressable style={styles.homeMenuItem} onPress={() => { }}>
+              <MaterialIcons
+                name="inbox"
+                size={20}
+                color="#111827"
+                style={{ marginRight: 10 }}
+              />
               <Text style={styles.homeMenuItemText}>Drawer Operations</Text>
             </Pressable>
 
-            <Pressable style={styles.homeMenuItem} onPress={() => {/* House account */ }}>
+            {/* 3) House Account */}
+            <Pressable style={styles.homeMenuItem} onPress={() => { }}>
+              <MaterialIcons
+                name="account-balance-wallet"
+                size={20}
+                color="#111827"
+                style={{ marginRight: 10 }}
+              />
               <Text style={styles.homeMenuItemText}>House Account Payment</Text>
             </Pressable>
 
-            <Pressable style={styles.homeMenuItem} onPress={() => {/* House account */ }}>
+            {/* 4) E-Invoice */}
+            <Pressable style={styles.homeMenuItem} onPress={() => { }}>
+              <MaterialIcons
+                name="receipt"
+                size={20}
+                color="#111827"
+                style={{ marginRight: 10 }}
+              />
               <Text style={styles.homeMenuItemText}>E-Invoice (ZATCA)</Text>
             </Pressable>
-            <Pressable style={styles.homeMenuItem} onPress={() => {/* House account */ }}>
+
+            {/* 5) Reports */}
+            <Pressable style={styles.homeMenuItem} onPress={() => { }}>
+              <MaterialIcons
+                name="bar-chart"
+                size={20}
+                color="#111827"
+                style={{ marginRight: 10 }}
+              />
               <Text style={styles.homeMenuItemText}>Reports</Text>
             </Pressable>
-            <Pressable style={styles.homeMenuItem} onPress={() => {/* House account */ }}>
+
+            {/* 6) Devices */}
+            <Pressable style={styles.homeMenuItem} onPress={() => { }}>
+              <MaterialIcons
+                name="devices"
+                size={20}
+                color="#111827"
+                style={{ marginRight: 10 }}
+              />
               <Text style={styles.homeMenuItemText}>Devices</Text>
             </Pressable>
 
+            {/* 7) EXIT — RED */}
             <Pressable
               style={styles.homeMenuItem}
               onPress={() => {
@@ -3173,9 +3214,19 @@ export default function ProductsScreen({
                 navigation.navigate("Home");
               }}
             >
-              <Text style={styles.homeMenuItemText}>Exit</Text>
+              <MaterialIcons
+                name="logout"
+                size={20}
+                color="#DC2626"
+                style={{ marginRight: 10 }}
+              />
+
+              <Text style={[styles.homeMenuItemText, { color: "#DC2626", fontWeight: "600" }]}>
+                Exit
+              </Text>
             </Pressable>
           </View>
+
         </View>
       </Modal>
 
@@ -3804,5 +3855,15 @@ const styles = StyleSheet.create({
     color: '#111827',
   },
 
+  homeMenuItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+  },
 
+  homeMenuItemText: {
+    fontSize: 15,
+    color: "#111827",
+  },
 });
