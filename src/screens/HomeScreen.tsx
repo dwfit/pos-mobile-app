@@ -404,7 +404,7 @@ export default function HomeScreen({ navigation, online }: any) {
           index: 0,
           routes: [
             {
-              name: 'Category',
+              name: 'ClockIn',
               params: {
                 branchId: branchObj?.id ?? null,
                 branchName: branchObj?.name ?? '',
@@ -479,7 +479,7 @@ export default function HomeScreen({ navigation, online }: any) {
           index: 0,
           routes: [
             {
-              name: 'Category',
+              name: 'ClockIn',
               params: {
                 branchId: branchObj?.id ?? branchId,
                 branchName: branchObj?.name ?? branchName ?? '',

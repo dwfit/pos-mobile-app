@@ -385,7 +385,6 @@ function normalizeOrderTypeLabel(label: string | null | undefined): string | nul
   if (raw.includes("pick") || raw.includes("take")) return "TAKE_AWAY";
   if (raw.includes("drive")) return "DRIVE_THRU";
   if (raw.includes("deliver")) return "DELIVERY";
-  if (raw === "b2b" || raw.includes("corporate")) return "B2B";
   const fallback = String(label).trim().toUpperCase().replace(/\s+/g, "_");
   if (fallback === "PICK_UP") return "TAKE_AWAY";
   return fallback;
@@ -463,13 +462,13 @@ function clearTierFromCartLocal(items: CartItem[]): CartItem[] {
 }
 
 export default function CategoryScreen({
-  route,
   navigation,
+  route,
   cart,
   setCart,
-  activeOrderId,
-  setActiveOrderId,
   online,
+  tillOpen,
+  setTillOpen,
 }: any) {
   const { branchName, userName } = route?.params || {};
   const [categories, setCategories] = useState<Category[]>([]);
@@ -527,6 +526,9 @@ export default function CategoryScreen({
     hasPermission("pos.discount.predefined.apply") ||
     hasPermission("APPLY_PREDEFINED_DISCOUNTS");
   const canUseAnyDiscount = canUseOpenDiscount || canUsePredefinedDiscount;
+  //for Home sub-menu
+  const [homeMenuVisible, setHomeMenuVisible] = useState(false);
+
 
   /* =========================
      ✅ Price Tier UI state
@@ -575,6 +577,56 @@ export default function CategoryScreen({
   }, [hydrateTier]);
 
   useEffect(() => {
+    async function apply() {
+      const items: CartItem[] = Array.isArray(cart) ? cart : [];
+      if (!items.length) return;
+
+      // No active tier → restore originals
+      if (!activeTier) {
+        const restored = clearTierFromCartLocal(items);
+        const changed =
+          restored.length !== items.length ||
+          restored.some((n, i) => n.price !== items[i].price);
+        if (changed) setCart(restored);
+        return;
+      }
+
+      const { productSizeIds, modifierItemIds } =
+        collectTierIdsFromCart(items);
+
+      if (
+        productSizeIds.length === 0 &&
+        modifierItemIds.length === 0
+      ) {
+        return;
+      }
+
+      const pricing = await getTierPricingForIds({
+        tierId: activeTier.id,
+        productSizeIds,
+        modifierItemIds,
+      });
+
+      const next = applyTierToCartLocal(
+        items,
+        pricing.sizePriceMap,
+        pricing.modifierPriceMap
+      );
+
+      const changed =
+        next.length !== items.length ||
+        next.some((n, i) => n.price !== items[i].price);
+
+      if (changed) {
+        setCart(next);
+      }
+    }
+
+    apply();
+  }, [activeTier, cart]);
+
+
+  useEffect(() => {
     loadAppliedDiscountFromStorage();
   }, []);
 
@@ -588,6 +640,7 @@ export default function CategoryScreen({
       if (unsubscribe) unsubscribe();
     };
   }, [navigation]);
+  
 
   /* ------------------------ sync orders cache ------------------------ */
   async function syncOrdersCache() {
@@ -1110,7 +1163,7 @@ export default function CategoryScreen({
           }));
 
         setTiers(list);
-        if (activeTier?.id && !list.some((t) => t.id === activeTier.id)) {
+        if (list.length > 0 && activeTier?.id && !list.some((t) => t.id === activeTier.id)) {
           await setActiveTier(null);
           setCart((prev: CartItem[]) =>
             clearTierFromCartLocal(Array.isArray(prev) ? prev : [])
@@ -1269,6 +1322,44 @@ export default function CategoryScreen({
 
   const groupedPaymentsArray = Object.values(groupedPayments);
   const quickAmounts = [remaining, 50, 100].filter((x) => x > 0.01);
+
+  /* ------------------------ Global Till shift  HELPERS ------------------------ */
+  async function handleOpenOrCloseTill() {
+    try {
+      if (!tillOpen) {
+        // OPEN TILL
+        const res: any = await post("/pos/till/open", { openingCash: 0 }); // or show a modal to enter amount
+
+        await AsyncStorage.multiSet([
+          ["pos_till_opened", "1"],
+          ["pos_till_session_id", String(res?.tillSessionId || "")],
+        ]);
+
+        setTillOpen(true);
+        Alert.alert("Till opened", "Till opened successfully.");
+      } else {
+        // CLOSE TILL
+        const tillId = await AsyncStorage.getItem("pos_till_session_id");
+        const res: any = await post("/pos/till/close", {
+          tillSessionId: tillId || undefined,
+          closingCash: 0, // later you can ask the cashier
+        });
+
+        await AsyncStorage.multiSet([
+          ["pos_till_opened", "0"],
+          ["pos_till_session_id", ""],
+        ]);
+
+        setTillOpen(false);
+        Alert.alert("Till closed", "Till closed successfully.");
+      }
+    } catch (e: any) {
+      console.log("handleOpenOrCloseTill error", e);
+      Alert.alert("Error", e?.message || "Till operation failed.");
+    } finally {
+      setHomeMenuVisible(false);
+    }
+  }
 
   /* ------------------------ CUSTOMER HELPERS ------------------------ */
 
@@ -2235,7 +2326,7 @@ export default function CategoryScreen({
       <View style={styles.bottomBar}>
         <Pressable
           style={styles.bottomItem}
-          onPress={() => navigation.navigate("Home")}
+          onPress={() => setHomeMenuVisible(true)}
         >
           <Text style={styles.bottomIcon}>🏠</Text>
           <Text style={styles.bottomLabel}>HOME</Text>
@@ -2882,6 +2973,62 @@ export default function CategoryScreen({
         </View>
       </Modal>
 
+      {/* HOME POPUP MENU */}
+      <Modal
+        visible={homeMenuVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setHomeMenuVisible(false)}
+      >
+        <View style={styles.homeMenuOverlay}>
+          {/* tap outside to close */}
+          <Pressable
+            style={StyleSheet.absoluteFill}
+            onPress={() => setHomeMenuVisible(false)}
+          />
+
+          <View style={styles.homeMenuCard}>
+            {/* 1) OPEN / CLOSE TILL – DYNAMIC TEXT */}
+            <Pressable
+              style={styles.homeMenuItem}
+              onPress={handleOpenOrCloseTill}
+            >
+              <Text style={styles.homeMenuItemText}>
+                {tillOpen ? "Close Till" : "Open Till"}
+              </Text>
+            </Pressable>
+
+            {/* 2) other static items */}
+            <Pressable style={styles.homeMenuItem} onPress={() => {/* Drawer ops */ }}>
+              <Text style={styles.homeMenuItemText}>Drawer Operations</Text>
+            </Pressable>
+
+            <Pressable style={styles.homeMenuItem} onPress={() => {/* House account */ }}>
+              <Text style={styles.homeMenuItemText}>House Account Payment</Text>
+            </Pressable>
+
+            <Pressable style={styles.homeMenuItem} onPress={() => {/* House account */ }}>
+              <Text style={styles.homeMenuItemText}>E-Invoice (ZATCA)</Text>
+            </Pressable>
+            <Pressable style={styles.homeMenuItem} onPress={() => {/* House account */ }}>
+              <Text style={styles.homeMenuItemText}>Reports</Text>
+            </Pressable>
+            <Pressable style={styles.homeMenuItem} onPress={() => {/* House account */ }}>
+              <Text style={styles.homeMenuItemText}>Devices</Text>
+            </Pressable>
+
+            <Pressable
+              style={styles.homeMenuItem}
+              onPress={() => {
+                setHomeMenuVisible(false);
+                navigation.navigate("Home");
+              }}
+            >
+              <Text style={styles.homeMenuItemText}>Exit</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -3268,9 +3415,9 @@ const styles = StyleSheet.create({
   removeDiscountText: { marginTop: 4, fontSize: 12, color: "#b91c1c", textAlign: "right" },
 
 
-  tierBackdrop: { // ✅ tier modal styles
+  tierBackdrop: {
     flex: 1,
-    backgroundColor: "rgba(17, 24, 39, 0.45)", // slate-900/45
+    backgroundColor: "rgba(17, 24, 39, 0.45)",
     justifyContent: "center",
     alignItems: "center",
     padding: 16,
@@ -3366,6 +3513,36 @@ const styles = StyleSheet.create({
 
   // Loading line (optional)
   tierLoadingText: { marginHorizontal: 16, marginTop: 10, fontSize: 12, color: "#6B7280" },
+
+  homeMenuOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.25)',
+  },
+  homeMenuCard: {
+    position: 'absolute',
+    left: 25,
+    bottom: 10,
+    width: 300,
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    paddingVertical: 4,
+    shadowColor: '#000',
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 8,
+  },
+  homeMenuItem: {
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f3f4f6',
+  },
+  homeMenuItemText: {
+    fontSize: 14,
+    color: '#111827',
+  },
+
 
 
 });

@@ -25,6 +25,7 @@ import { getTierPricingForIds } from '../services/tierPricing';
 import { usePriceTierStore, type PriceTier } from '../store/priceTierStore';
 import { useOrderTypeStore } from "../store/orderTypeStore";
 
+
 type ProductSize = {
   id: string;
   name: string;
@@ -257,11 +258,47 @@ function normalizeOrderTypeLabel(
   if (fallback === 'PICK_UP') return 'TAKE_AWAY';
   return fallback;
 }
+/* ------------------------ Till Till session ------------------------ */
+async function handleOpenOrCloseTill() {
+  try {
+    if (!tillOpen) {
+      // OPEN TILL
+      const res: any = await post("/pos/till/open", { openingCash: 0 }); // or show a modal to enter amount
 
-/* =========================
-   ✅ Tier pricing helpers (shared across screens)
-   ========================= */
+      await AsyncStorage.multiSet([
+        ["pos_till_opened", "1"],
+        ["pos_till_session_id", String(res?.tillSessionId || "")],
+      ]);
 
+      setTillOpen(true);
+      Alert.alert("Till opened", "Till opened successfully.");
+    } else {
+      // CLOSE TILL
+      const tillId = await AsyncStorage.getItem("pos_till_session_id");
+      const res: any = await post("/pos/till/close", {
+        tillSessionId: tillId || undefined,
+        closingCash: 0, // later you can ask the cashier
+      });
+
+      await AsyncStorage.multiSet([
+        ["pos_till_opened", "0"],
+        ["pos_till_session_id", ""],
+      ]);
+
+      setTillOpen(false);
+      Alert.alert("Till closed", "Till closed successfully.");
+    }
+  } catch (e: any) {
+    console.log("handleOpenOrCloseTill error", e);
+    Alert.alert("Error", e?.message || "Till operation failed.");
+  } finally {
+    setHomeMenuVisible(false);
+  }
+}
+
+
+
+/* ------------------------ Tier pricing helpers (shared across screens) ------------------------ */
 function collectTierIdsFromCart(items: CartItem[]) {
   const productSizeIds: string[] = [];
   const modifierItemIds: string[] = [];
@@ -449,13 +486,13 @@ async function getEffectiveBrandId(current: string | null): Promise<string | nul
 
 /* ------------------------ COMPONENT ------------------------ */
 export default function ProductsScreen({
-  route,
   navigation,
+  route,
   cart,
   setCart,
-  activeOrderId,
-  setActiveOrderId,
   online,
+  tillOpen,
+  setTillOpen,
 }: any) {
 
   const isOnline = online ?? true;
@@ -540,7 +577,8 @@ export default function ProductsScreen({
   const activeTier = usePriceTierStore((s) => s.activeTier);
   const setActiveTier = usePriceTierStore((s) => s.setActiveTier);
   const hydrateTier = usePriceTierStore((s) => s.hydrate);
-
+  //for Home sub-menu
+  const [homeMenuVisible, setHomeMenuVisible] = useState(false);
   // Handy alias for cart
   const cartItems: CartItem[] = Array.isArray(cart) ? (cart as CartItem[]) : [];
 
@@ -549,6 +587,58 @@ export default function ProductsScreen({
     hydrateTier().catch(() => { });
   }, [hydrateTier]);
 
+  useEffect(() => {
+    async function apply() {
+      const items: CartItem[] = Array.isArray(cart) ? cart : [];
+      if (!items.length) return;
+
+      // If no active tier → restore original prices
+      if (!activeTier) {
+        const restored = clearTierFromCartLocal(items);
+        // avoid useless setCart if nothing changed
+        const changed =
+          restored.length !== items.length ||
+          restored.some((n, i) => n.price !== items[i].price);
+        if (changed) setCart(restored);
+        return;
+      }
+
+      // Collect ids from current cart
+      const { productSizeIds, modifierItemIds } =
+        collectTierIdsFromCart(items);
+
+      if (
+        productSizeIds.length === 0 &&
+        modifierItemIds.length === 0
+      ) {
+        return;
+      }
+
+      const pricing = await getTierPricingForIds({
+        tierId: activeTier.id,
+        productSizeIds,
+        modifierItemIds,
+      });
+
+      const next = applyTierToCartLocal(
+        items,
+        pricing.sizePriceMap,
+        pricing.modifierPriceMap
+      );
+
+      // 🔁 prevent infinite loop: only set when prices really changed
+      const changed =
+        next.length !== items.length ||
+        next.some((n, i) => n.price !== items[i].price);
+
+      if (changed) {
+        setCart(next);
+      }
+    }
+
+    apply();
+  }, [activeTier, cart]);
+  
   /* ------------------------ LOAD DEVICE INFO (brandId/deviceId/branchId) ------------------------ */
 
   useEffect(() => {
@@ -2320,7 +2410,7 @@ export default function ProductsScreen({
       <View style={styles.bottomBar}>
         <Pressable
           style={styles.bottomItem}
-          onPress={() => navigation.navigate('Home')}
+          onPress={() => setHomeMenuVisible(true)}
         >
           <Text style={styles.bottomIcon}>🏠</Text>
           <Text style={styles.bottomLabel}>HOME</Text>
@@ -3032,6 +3122,64 @@ export default function ProductsScreen({
           </View>
         </View>
       </Modal>
+      {/* HOME POPUP MENU */}
+      <Modal
+        visible={homeMenuVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setHomeMenuVisible(false)}
+      >
+        <View style={styles.homeMenuOverlay}>
+          {/* tap outside to close */}
+          <Pressable
+            style={StyleSheet.absoluteFill}
+            onPress={() => setHomeMenuVisible(false)}
+          />
+
+          <View style={styles.homeMenuCard}>
+            {/* 1) OPEN / CLOSE TILL – DYNAMIC TEXT */}
+            <Pressable
+              style={styles.homeMenuItem}
+              onPress={handleOpenOrCloseTill}
+            >
+              <Text style={styles.homeMenuItemText}>
+                {tillOpen ? "Close Till" : "Open Till"}
+              </Text>
+            </Pressable>
+
+            {/* 2) other static items */}
+            <Pressable style={styles.homeMenuItem} onPress={() => {/* Drawer ops */ }}>
+              <Text style={styles.homeMenuItemText}>Drawer Operations</Text>
+            </Pressable>
+
+            <Pressable style={styles.homeMenuItem} onPress={() => {/* House account */ }}>
+              <Text style={styles.homeMenuItemText}>House Account Payment</Text>
+            </Pressable>
+
+            <Pressable style={styles.homeMenuItem} onPress={() => {/* House account */ }}>
+              <Text style={styles.homeMenuItemText}>E-Invoice (ZATCA)</Text>
+            </Pressable>
+            <Pressable style={styles.homeMenuItem} onPress={() => {/* House account */ }}>
+              <Text style={styles.homeMenuItemText}>Reports</Text>
+            </Pressable>
+            <Pressable style={styles.homeMenuItem} onPress={() => {/* House account */ }}>
+              <Text style={styles.homeMenuItemText}>Devices</Text>
+            </Pressable>
+
+            <Pressable
+              style={styles.homeMenuItem}
+              onPress={() => {
+                setHomeMenuVisible(false);
+                navigation.navigate("Home");
+              }}
+            >
+              <Text style={styles.homeMenuItemText}>Exit</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+
+
 
     </SafeAreaView>
   );
@@ -3626,5 +3774,35 @@ const styles = StyleSheet.create({
 
   // Loading line (optional)
   tierLoadingText: { marginHorizontal: 16, marginTop: 10, fontSize: 12, color: "#6B7280" },
+
+  homeMenuOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.25)',
+  },
+  homeMenuCard: {
+    position: 'absolute',
+    left: 25,
+    bottom: 10,
+    width: 300,
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    paddingVertical: 4,
+    shadowColor: '#000',
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 8,
+  },
+  homeMenuItem: {
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f3f4f6',
+  },
+  homeMenuItemText: {
+    fontSize: 14,
+    color: '#111827',
+  },
+
 
 });

@@ -129,6 +129,50 @@ export async function initDatabase() {
       );
     `);
 
+    /**
+     * 🔹 NEW: local_shifts
+     * For offline clock-in / clock-out.
+     * synced = 0 (pending), 1 (synced to server)
+     * createdAt used later for cleanup (keep last 1 day only).
+     */
+    await execSql(`
+      CREATE TABLE IF NOT EXISTS local_shifts (
+        id TEXT PRIMARY KEY,
+        userId TEXT,
+        branchId TEXT,
+        brandId TEXT,
+        deviceId TEXT,
+        clockInAt TEXT,
+        clockOutAt TEXT,
+        status TEXT,
+        synced INTEGER,
+        serverId TEXT,
+        createdAt TEXT
+      );
+    `);
+
+    /**
+     * 🔹 NEW: local_till_sessions
+     * For offline till open / close.
+     */
+    await execSql(`
+      CREATE TABLE IF NOT EXISTS local_till_sessions (
+        id TEXT PRIMARY KEY,
+        shiftLocalId TEXT,
+        branchId TEXT,
+        brandId TEXT,
+        deviceId TEXT,
+        openingCash REAL,
+        closingCash REAL,
+        openedAt TEXT,
+        closedAt TEXT,
+        status TEXT,
+        synced INTEGER,
+        serverId TEXT,
+        createdAt TEXT
+      );
+    `);
+
     // 2) Migrations for old installs (check columns first with PRAGMA)
 
     // ---- categories columns ----
