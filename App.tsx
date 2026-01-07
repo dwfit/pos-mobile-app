@@ -20,6 +20,8 @@ import CategoryScreen from "./src/screens/CategoryScreen";
 import ProductsScreen from "./src/screens/ProductsScreen";
 import ModifiersScreen from "./src/screens/ModifiersScreen";
 import OrdersScreen from "./src/screens/OrdersScreen";
+import DevicesScreen from "./src/screens/DevicesScreen";
+import DeviceInfoScreen from "./src/screens/DeviceInfoScreen"; // ✅ NEW
 
 // PROVIDERS
 import { CallcenterOrdersProvider } from "./src/context/CallcenterOrdersContext";
@@ -53,12 +55,22 @@ export type RootStackParamList = {
     sizeName?: string | null;
   };
   Orders:
-  | {
-    mode?: "void" | "reopen";
-    branchName?: string;
-    userName?: string;
-  }
-  | undefined;
+    | {
+        mode?: "void" | "reopen";
+        branchName?: string;
+        userName?: string;
+      }
+    | undefined;
+
+  // ✅ DEVICES LIST (popup)
+  Devices: undefined;
+
+  // ✅ DEVICE INFO (e.g. Printer Info)
+  DeviceInfo: {
+    mode: "create" | "edit";
+    deviceType: string; // "Printer", "KDS", etc.
+    deviceId?: string;
+  };
 };
 
 type ScreenName = keyof RootStackParamList;
@@ -94,9 +106,16 @@ export default function App() {
   const [ordersParams, setOrdersParams] =
     useState<RootStackParamList["Orders"]>(undefined);
 
+  const [deviceInfoParams, setDeviceInfoParams] =
+    useState<RootStackParamList["DeviceInfo"]>({
+      mode: "create",
+      deviceType: "Printer",
+    });
+
   // Cart for POS
   const [cart, setCart] = useState<any[]>([]);
   const [activeOrderId, setActiveOrderId] = useState<string | null>(null);
+
   // ✅ GLOBAL till state
   const [tillOpen, setTillOpen] = useState(false);
 
@@ -180,6 +199,8 @@ export default function App() {
       if (name === "Products") setProductParams(params || {});
       if (name === "Modifiers") setModifierParams(params || {});
       if (name === "Orders") setOrdersParams(params);
+      if (name === "DeviceInfo") setDeviceInfoParams(params);
+      // Devices currently has no params → nothing else to store
       setScreen(name);
     },
 
@@ -189,6 +210,7 @@ export default function App() {
       if (name === "Products") setProductParams(params || {});
       if (name === "Modifiers") setModifierParams(params || {});
       if (name === "Orders") setOrdersParams(params);
+      if (name === "DeviceInfo") setDeviceInfoParams(params);
       setScreen(name);
     },
 
@@ -203,6 +225,7 @@ export default function App() {
       if (route.name === "Products") setProductParams(route.params || {});
       if (route.name === "Modifiers") setModifierParams(route.params || {});
       if (route.name === "Orders") setOrdersParams(route.params);
+      if (route.name === "DeviceInfo") setDeviceInfoParams(route.params);
 
       setScreen(route.name);
     },
@@ -226,6 +249,16 @@ export default function App() {
       }
       if (screen === "Orders") {
         setScreen("Products");
+        return;
+      }
+      if (screen === "Devices") {
+        // from Devices back to Products
+        setScreen("Products");
+        return;
+      }
+      if (screen === "DeviceInfo") {
+        // from Printer Info back to Devices
+        setScreen("Devices");
         return;
       }
     },
@@ -275,6 +308,7 @@ export default function App() {
           setTillOpen={setTillOpen}
         />
       )}
+
       {screen === "Modifiers" && (
         <ModifiersScreen
           navigation={navigation}
@@ -295,7 +329,17 @@ export default function App() {
           online={online}
         />
       )}
+
+      {screen === "Devices" && (
+        <DevicesScreen navigation={navigation} online={online} />
+      )}
+
+      {screen === "DeviceInfo" && (
+        <DeviceInfoScreen
+          navigation={navigation}
+          route={{ params: deviceInfoParams }}
+        />
+      )}
     </CallcenterOrdersProvider>
   );
-
 }

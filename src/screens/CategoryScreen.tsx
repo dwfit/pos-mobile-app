@@ -470,6 +470,8 @@ export default function CategoryScreen({
   online,
   tillOpen,
   setTillOpen,
+  activeOrderId,
+  setActiveOrderId,
 }: any) {
   const { branchName, userName } = route?.params || {};
   const [categories, setCategories] = useState<Category[]>([]);
@@ -3055,7 +3057,13 @@ export default function CategoryScreen({
             </Pressable>
 
             {/* 6) Devices */}
-            <Pressable style={styles.homeMenuItem} onPress={() => { }}>
+            <Pressable
+              style={styles.homeMenuItem}
+              onPress={() => {
+                setHomeMenuVisible(false);
+                navigation.navigate("Devices");
+              }}
+            >
               <MaterialIcons
                 name="devices"
                 size={20}

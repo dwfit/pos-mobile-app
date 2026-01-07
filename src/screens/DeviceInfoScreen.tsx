@@ -1,0 +1,473 @@
+// src/screens/DeviceInfoScreen.tsx
+import React, { useState, useEffect } from "react";
+import {
+  SafeAreaView,
+  View,
+  Text,
+  Pressable,
+  StyleSheet,
+  TextInput,
+  FlatList,
+} from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { MaterialIcons } from "@expo/vector-icons";
+
+const STORAGE_KEY = "pos_devices";
+
+const PRINTER_MODELS = [
+  "TM_T20",
+  "TM_T20II",
+  "TM_T20III",
+  "TM_m30",
+  "TM_m30II",
+  "TM_P80",
+  "TM_T88V",
+  "TM_T20X",
+  "TM_L100",
+];
+
+const PRINTER_TYPES = [
+  "Cashier",
+  "Kitchen",
+  "Order info",
+  "Kitchen Sticky Printer",
+];
+
+const ORDER_TYPE_OPTIONS = [
+  { code: "DINE_IN", label: "Dine In" },
+  { code: "TAKE_AWAY", label: "Take Away" },
+  { code: "DELIVERY", label: "Delivery" },
+  { code: "DRIVE_THRU", label: "Drive Thru" },
+];
+
+type DeviceInfoRouteParams = {
+  mode: "create" | "edit";
+  deviceType: string; // "Printer" etc.
+  deviceId?: string;
+};
+
+type Props = {
+  navigation: any;
+  route: { params: DeviceInfoRouteParams };
+};
+
+type SubScreen = "MAIN" | "MODEL" | "TYPE" | "ORDER_TYPES";
+
+type StoredDevice = {
+  id: string;
+  kind: string; // "Printer"
+  model: string | null;
+  typeLabel: string | null;
+  name: string;
+  ip: string;
+  enabledOrderTypes: string[]; // codes
+};
+
+export default function DeviceInfoScreen({ navigation, route }: Props) {
+  const { mode, deviceType, deviceId } = route.params || {
+    mode: "create",
+    deviceType: "Printer",
+  };
+
+  const [subScreen, setSubScreen] = useState<SubScreen>("MAIN");
+
+  const [model, setModel] = useState<string | null>(null);
+  const [typeLabel, setTypeLabel] = useState<string | null>(null);
+  const [name, setName] = useState<string>("");
+  const [ip, setIp] = useState<string>("");
+  const [enabledOrderTypes, setEnabledOrderTypes] = useState<string[]>([]);
+
+  // ===== Load existing device when editing ==========================
+  useEffect(() => {
+    async function loadForEdit() {
+      if (mode !== "edit" || !deviceId) return;
+
+      try {
+        const raw = await AsyncStorage.getItem(STORAGE_KEY);
+        const list: StoredDevice[] = raw ? JSON.parse(raw) : [];
+        const found = list.find((d) => d.id === deviceId);
+        if (!found) return;
+
+        setModel(found.model || null);
+        setTypeLabel(found.typeLabel || null);
+        setName(found.name || "");
+        setIp(found.ip || "");
+        setEnabledOrderTypes(found.enabledOrderTypes || []);
+      } catch (e) {
+        console.log("loadForEdit error", e);
+      }
+    }
+
+    loadForEdit();
+  }, [mode, deviceId]);
+
+  // ===== Helpers ====================================================
+
+  function toggleOrderType(code: string) {
+    setEnabledOrderTypes((prev) =>
+      prev.includes(code) ? prev.filter((c) => c !== code) : [...prev, code]
+    );
+  }
+
+  function getEnabledTypesLabel() {
+    if (!enabledOrderTypes || enabledOrderTypes.length === 0) return "Not set";
+
+    const labels = ORDER_TYPE_OPTIONS
+      .filter((o) => enabledOrderTypes.includes(o.code))
+      .map((o) => o.label);
+
+    return labels.join(", ");
+  }
+
+  const headerTitle =
+    subScreen === "MAIN"
+      ? "Printer Info"
+      : subScreen === "MODEL"
+      ? "Model"
+      : subScreen === "TYPE"
+      ? "Type"
+      : "Enabled order types";
+
+  const showSave = subScreen === "MAIN";
+
+  function handleBack() {
+    if (subScreen === "MAIN") {
+      navigation.goBack(); // App.tsx: DeviceInfo -> Devices
+    } else {
+      setSubScreen("MAIN");
+    }
+  }
+
+  // ===== SAVE to AsyncStorage ======================================
+
+  async function saveDevice() {
+    try {
+      const raw = await AsyncStorage.getItem(STORAGE_KEY);
+      const list: StoredDevice[] = raw ? JSON.parse(raw) : [];
+
+      let nextList: StoredDevice[];
+
+      if (mode === "edit" && deviceId) {
+        const updated: StoredDevice = {
+          id: deviceId,
+          kind: deviceType,
+          model,
+          typeLabel,
+          name,
+          ip,
+          enabledOrderTypes,
+        };
+        nextList = list.map((d) => (d.id === deviceId ? updated : d));
+      } else {
+        const id = deviceId || Date.now().toString();
+        const item: StoredDevice = {
+          id,
+          kind: deviceType,
+          model,
+          typeLabel,
+          name,
+          ip,
+          enabledOrderTypes,
+        };
+        nextList = [...list, item];
+      }
+
+      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(nextList));
+
+      // back to Devices
+      navigation.goBack();
+    } catch (e) {
+      console.log("saveDevice error", e);
+      navigation.goBack();
+    }
+  }
+
+  // ===== RENDER =====================================================
+
+  return (
+    <SafeAreaView style={styles.overlay}>
+      <View style={styles.card}>
+        {/* Header */}
+        <View style={styles.header}>
+          <Pressable onPress={handleBack}>
+            <Text style={styles.headerLink}>Back</Text>
+          </Pressable>
+
+          <Text style={styles.headerTitle}>{headerTitle}</Text>
+
+          <View style={{ width: 60, alignItems: "flex-end" }}>
+            {showSave && (
+              <Pressable onPress={saveDevice}>
+                <Text style={styles.headerLink}>Save</Text>
+              </Pressable>
+            )}
+          </View>
+        </View>
+
+        {/* MAIN SCREEN ------------------------------------------------ */}
+        {subScreen === "MAIN" && (
+          <View style={styles.list}>
+            {/* Model row */}
+            <Pressable
+              style={styles.row}
+              onPress={() => setSubScreen("MODEL")}
+            >
+              <Text style={styles.rowLabel}>Model</Text>
+              <View style={styles.rowRight}>
+                <Text
+                  style={[
+                    styles.rowValue,
+                    !model && styles.placeholderText,
+                  ]}
+                >
+                  {model || "Select model"}
+                </Text>
+                <MaterialIcons
+                  name="chevron-right"
+                  size={20}
+                  color="#9ca3af"
+                />
+              </View>
+            </Pressable>
+
+            {/* Type row */}
+            <Pressable
+              style={styles.row}
+              onPress={() => setSubScreen("TYPE")}
+            >
+              <Text style={styles.rowLabel}>Type</Text>
+              <View style={styles.rowRight}>
+                <Text
+                  style={[
+                    styles.rowValue,
+                    !typeLabel && styles.placeholderText,
+                  ]}
+                >
+                  {typeLabel || "Select type"}
+                </Text>
+                <MaterialIcons
+                  name="chevron-right"
+                  size={20}
+                  color="#9ca3af"
+                />
+              </View>
+            </Pressable>
+
+            {/* NAME row */}
+            <View style={styles.row}>
+              <Text style={styles.rowLabel}>Name</Text>
+              <TextInput
+                style={[
+                  styles.textInput,
+                  !name && styles.placeholderText,
+                ]}
+                value={name}
+                onChangeText={setName}
+                placeholder="Printer name"
+                placeholderTextColor="#9ca3af"
+              />
+            </View>
+
+            {/* IP row */}
+            <View style={styles.row}>
+              <Text style={styles.rowLabel}>IP address</Text>
+              <TextInput
+                style={[
+                  styles.textInput,
+                  !ip && styles.placeholderText,
+                ]}
+                value={ip}
+                onChangeText={setIp}
+                keyboardType="numeric"
+                placeholder="0.0.0.0"
+                placeholderTextColor="#9ca3af"
+              />
+            </View>
+
+            {/* Enabled order types */}
+            <Pressable
+              style={styles.row}
+              onPress={() => setSubScreen("ORDER_TYPES")}
+            >
+              <Text style={styles.rowLabel}>Enabled order types</Text>
+              <View style={styles.rowRight}>
+                <Text
+                  style={[
+                    styles.rowValue,
+                    (!enabledOrderTypes ||
+                      !enabledOrderTypes.length) &&
+                      styles.placeholderText,
+                  ]}
+                >
+                  {getEnabledTypesLabel()}
+                </Text>
+                <MaterialIcons
+                  name="chevron-right"
+                  size={20}
+                  color="#9ca3af"
+                />
+              </View>
+            </Pressable>
+          </View>
+        )}
+
+        {/* MODEL LIST ------------------------------------------------- */}
+        {subScreen === "MODEL" && (
+          <FlatList
+            data={PRINTER_MODELS}
+            keyExtractor={(m) => m}
+            ItemSeparatorComponent={() => <View style={styles.separator} />}
+            renderItem={({ item }) => (
+              <Pressable
+                style={styles.row}
+                onPress={() => {
+                  setModel(item);
+                  setSubScreen("MAIN");
+                }}
+              >
+                <Text style={styles.rowLabel}>{item}</Text>
+              </Pressable>
+            )}
+          />
+        )}
+
+        {/* TYPE LIST -------------------------------------------------- */}
+        {subScreen === "TYPE" && (
+          <FlatList
+            data={PRINTER_TYPES}
+            keyExtractor={(m) => m}
+            ItemSeparatorComponent={() => <View style={styles.separator} />}
+            renderItem={({ item }) => (
+              <Pressable
+                style={styles.row}
+                onPress={() => {
+                  setTypeLabel(item);
+                  setSubScreen("MAIN");
+                }}
+              >
+                <Text style={styles.rowLabel}>{item}</Text>
+              </Pressable>
+            )}
+          />
+        )}
+
+        {/* ORDER TYPES ------------------------------------------------ */}
+        {subScreen === "ORDER_TYPES" && (
+          <View style={{ flex: 1 }}>
+            <View style={styles.sectionHeaderRow}>
+              <Text style={styles.sectionHeader}>ENABLED ORDER TYPES</Text>
+            </View>
+            <FlatList
+              data={ORDER_TYPE_OPTIONS}
+              keyExtractor={(m) => m.code}
+              ItemSeparatorComponent={() => <View style={styles.separator} />}
+              renderItem={({ item }) => {
+                const active = enabledOrderTypes.includes(item.code);
+                return (
+                  <Pressable
+                    style={styles.row}
+                    onPress={() => toggleOrderType(item.code)}
+                  >
+                    <Text style={styles.rowLabel}>{item.label}</Text>
+                    {active && (
+                      <MaterialIcons
+                        name="check"
+                        size={20}
+                        color="#10b981"
+                      />
+                    )}
+                  </Pressable>
+                );
+              }}
+            />
+          </View>
+        )}
+      </View>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  overlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.25)",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  card: {
+    width: "94%",
+    height: "90%",
+    backgroundColor: "#ffffff",
+    borderRadius: 28,
+    overflow: "hidden",
+    shadowColor: "#000",
+    shadowOpacity: 0.2,
+    shadowOffset: { width: 0, height: 8 },
+    shadowRadius: 18,
+    elevation: 10,
+  },
+  header: {
+    paddingHorizontal: 24,
+    paddingTop: 14,
+    paddingBottom: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  headerLink: {
+    color: "#000000",
+    fontSize: 16,
+    fontWeight: "500",
+  },
+  headerTitle: {
+    fontSize: 18,
+    fontWeight: "600",
+    color: "#111827",
+  },
+  list: {
+    flex: 1,
+  },
+  row: {
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  rowLabel: {
+    fontSize: 15,
+    color: "#111827",
+  },
+  rowRight: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  rowValue: {
+    fontSize: 14,
+    color: "#111827",
+    marginRight: 4,
+  },
+  textInput: {
+    minWidth: 200,
+    textAlign: "right",
+    fontSize: 15,
+    color: "#111827",
+  },
+  placeholderText: {
+    color: "#9ca3af",
+  },
+  separator: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: "#e5e7eb",
+  },
+  sectionHeaderRow: {
+    paddingHorizontal: 24,
+    paddingTop: 10,
+    paddingBottom: 4,
+  },
+  sectionHeader: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: "#6b7280",
+  },
+});

@@ -10,6 +10,7 @@ import {
   Alert,
   KeyboardAvoidingView,
   Platform,
+  Modal,
 } from "react-native";
 
 import {
@@ -40,6 +41,12 @@ export default function ClockInScreen({ navigation, route }: Props) {
   const [branchId, setBranchId] = useState<string | null>(null);
   const [brandId, setBrandId] = useState<string | null>(null);
   const [deviceId, setDeviceId] = useState<string | null>(null);
+
+  // ===== NEW: state for close-till flow =====
+  const [confirmCloseVisible, setConfirmCloseVisible] = useState(false);
+  const [closeAmountVisible, setCloseAmountVisible] = useState(false);
+  const [printPromptVisible, setPrintPromptVisible] = useState(false);
+  const [tillCloseAmount, setTillCloseAmount] = useState("");
 
   // Restore flags
   useEffect(() => {
@@ -87,7 +94,7 @@ export default function ClockInScreen({ navigation, route }: Props) {
     const net = await NetInfo.fetch();
     const isOnline = !!net.isConnected && !!net.isInternetReachable;
 
-    // ========== CLOCK IN ==========
+    // ------------- CLOCK IN -------------
     if (!clockedIn) {
       if (!branchId) {
         Alert.alert("Missing branch", "Device must be activated again.");
@@ -120,7 +127,10 @@ export default function ClockInScreen({ navigation, route }: Props) {
             });
 
             // Mark synced in DB
-            await closeLocalShift(localShiftId, { syncOnly: true, serverId: res?.shiftId });
+            await closeLocalShift(localShiftId, {
+              syncOnly: true,
+              serverId: res?.shiftId,
+            });
           } catch {}
         }
       } catch (e: any) {
@@ -132,7 +142,7 @@ export default function ClockInScreen({ navigation, route }: Props) {
       return;
     }
 
-    // ========== CLOCK OUT ==========
+    // ------------- CLOCK OUT -------------
     if (tillOpened) {
       Alert.alert("Close Till", "Close the till before clocking out.");
       return;
@@ -163,19 +173,61 @@ export default function ClockInScreen({ navigation, route }: Props) {
 
   /* ================= TILL ================= */
 
+  // Real close logic (called after amount is entered)
+  async function actuallyCloseTill(closingCash: number) {
+    const net = await NetInfo.fetch();
+    const isOnline = !!net.isConnected && !!net.isInternetReachable;
+
+    try {
+      setLoading(true);
+
+      const t = await AsyncStorage.getItem("pos_till_session_id");
+      await closeLocalTill(t || undefined);
+
+      await AsyncStorage.multiSet([
+        ["pos_till_opened", "0"],
+        ["pos_till_session_id", ""],
+      ]);
+      setTillOpened(false);
+      setOpeningAmount("");
+      setTillCloseAmount("");
+
+      if (isOnline) {
+        try {
+          await post("/pos/till/close", {
+            branchId,
+            brandId,
+            deviceId,
+            closingCash, // 🧮 cash sales amount
+          });
+        } catch {}
+      }
+
+      // show print-report prompt
+      setPrintPromptVisible(true);
+    } catch (e: any) {
+      Alert.alert("Till close failed", e?.message || "Try again.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function handleToggleTill() {
     if (!clockedIn) {
       Alert.alert("Clock In required");
       return;
     }
 
-    const net = await NetInfo.fetch();
-    const isOnline = !!net.isConnected && !!net.isInternetReachable;
-
     // ====== OPEN TILL ======
     if (!tillOpened) {
       const amount = Number(openingAmount.trim());
-      if (!amount) return Alert.alert("Enter opening cash");
+      if (!amount) {
+        Alert.alert("Enter opening cash");
+        return;
+      }
+
+      const net = await NetInfo.fetch();
+      const isOnline = !!net.isConnected && !!net.isInternetReachable;
 
       try {
         setLoading(true);
@@ -209,31 +261,11 @@ export default function ClockInScreen({ navigation, route }: Props) {
       return;
     }
 
-    // ====== CLOSE TILL ======
-    try {
-      setLoading(true);
-
-      const t = await AsyncStorage.getItem("pos_till_session_id");
-      await closeLocalTill(t || undefined);
-
-      await AsyncStorage.multiSet([
-        ["pos_till_opened", "0"],
-        ["pos_till_session_id", ""],
-      ]);
-      setTillOpened(false);
-      setOpeningAmount("");
-
-      if (isOnline) {
-        try {
-          await post("/pos/till/close", { branchId, brandId, deviceId });
-        } catch {}
-      }
-    } finally {
-      setLoading(false);
-    }
+    // ====== CLOSE TILL (start flow with confirmation popup) ======
+    setConfirmCloseVisible(true);
   }
 
-  /* ================= CONTINUE ================= */
+  /* ================= CONTINUE / EXIT ================= */
 
   function handleAccessRegister() {
     if (!clockedIn || !tillOpened) return;
@@ -247,6 +279,24 @@ export default function ClockInScreen({ navigation, route }: Props) {
       "pos_shift_id",
       "pos_till_session_id",
     ]).finally(() => navigation.replace("Home"));
+  }
+
+  function handlePrintTillReport(shouldPrint: boolean) {
+    setPrintPromptVisible(false);
+    if (shouldPrint) {
+      // TODO: hook up real printer call here
+      Alert.alert("Till Report", "Send till report to printer here.");
+    }
+  }
+
+  /* ================= KEYPAD HELPERS ================= */
+
+  function handleKeypadPress(key: string) {
+    if (key === "C") {
+      setTillCloseAmount("");
+      return;
+    }
+    setTillCloseAmount((prev) => (prev || "") + key);
   }
 
   /* ------------- RENDER ------------- */
@@ -338,6 +388,162 @@ export default function ClockInScreen({ navigation, route }: Props) {
         >
           <Text style={styles.exitText}>Exit</Text>
         </Pressable>
+
+        {/* ===== MODALS ===== */}
+
+        {/* 1) Confirm Close Till */}
+        <Modal
+          visible={confirmCloseVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setConfirmCloseVisible(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalCard}>
+              <Text style={styles.modalTitle}>Close Till</Text>
+              <Text style={styles.modalMessage}>
+                Are you sure you want to close till?
+              </Text>
+
+              <View style={styles.modalButtonsRow}>
+                <Pressable
+                  style={[styles.modalBtn, styles.modalBtnSecondary]}
+                  onPress={() => setConfirmCloseVisible(false)}
+                >
+                  <Text style={styles.modalBtnTextSecondary}>No</Text>
+                </Pressable>
+
+                <Pressable
+                  style={[styles.modalBtn, styles.modalBtnPrimary]}
+                  onPress={() => {
+                    setConfirmCloseVisible(false);
+                    setTillCloseAmount("");
+                    setCloseAmountVisible(true);
+                  }}
+                >
+                  <Text style={styles.modalBtnTextPrimary}>Yes</Text>
+                </Pressable>
+              </View>
+            </View>
+          </View>
+        </Modal>
+
+        {/* 2) Enter Till Amount (numeric keypad) */}
+        <Modal
+          visible={closeAmountVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setCloseAmountVisible(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={styles.amountCard}>
+              <Text style={styles.modalTitle}>Enter Till Amount</Text>
+
+              <View style={styles.amountDisplay}>
+                <Text style={styles.amountText}>
+                  {tillCloseAmount || "0.00"}
+                </Text>
+              </View>
+
+              <View style={styles.keypadRow}>
+                {["1", "2", "3"].map((k) => (
+                  <Pressable
+                    key={k}
+                    style={styles.keypadKey}
+                    onPress={() => handleKeypadPress(k)}
+                  >
+                    <Text style={styles.keypadKeyText}>{k}</Text>
+                  </Pressable>
+                ))}
+              </View>
+              <View style={styles.keypadRow}>
+                {["4", "5", "6"].map((k) => (
+                  <Pressable
+                    key={k}
+                    style={styles.keypadKey}
+                    onPress={() => handleKeypadPress(k)}
+                  >
+                    <Text style={styles.keypadKeyText}>{k}</Text>
+                  </Pressable>
+                ))}
+              </View>
+              <View style={styles.keypadRow}>
+                {["7", "8", "9"].map((k) => (
+                  <Pressable
+                    key={k}
+                    style={styles.keypadKey}
+                    onPress={() => handleKeypadPress(k)}
+                  >
+                    <Text style={styles.keypadKeyText}>{k}</Text>
+                  </Pressable>
+                ))}
+              </View>
+              <View style={styles.keypadRow}>
+                {["C", "0"].map((k) => (
+                  <Pressable
+                    key={k}
+                    style={styles.keypadKey}
+                    onPress={() => handleKeypadPress(k)}
+                  >
+                    <Text style={styles.keypadKeyText}>{k}</Text>
+                  </Pressable>
+                ))}
+              </View>
+
+              <Pressable
+  style={styles.doneButton}
+  onPress={() => {
+    if (!tillCloseAmount) {
+      Alert.alert("Enter till amount");
+      return;
+    }
+    const val = Number(tillCloseAmount);
+    if (Number.isNaN(val)) {
+      Alert.alert("Invalid amount");
+      return;
+    }
+    setCloseAmountVisible(false);
+    actuallyCloseTill(val);
+  }}
+>
+  <Text style={styles.doneButtonText}>Done</Text>
+</Pressable>
+            </View>
+          </View>
+        </Modal>
+
+        {/* 3) Till closed successfully + print prompt */}
+        <Modal
+          visible={printPromptVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setPrintPromptVisible(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalCard}>
+              <Text style={styles.modalTitle}>Till Closed Successfully!</Text>
+              <Text style={styles.modalMessage}>
+                Till closed successfully! Would you like to print the till
+                report?
+              </Text>
+
+              <View style={styles.modalButtonsRow}>
+                <Pressable
+                  style={[styles.modalBtn, styles.modalBtnPrimary]}
+                  onPress={() => handlePrintTillReport(true)}
+                >
+                  <Text style={styles.modalBtnTextPrimary}>Yes</Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.modalBtn, styles.modalBtnSecondary]}
+                  onPress={() => handlePrintTillReport(false)}
+                >
+                  <Text style={styles.modalBtnTextSecondary}>No</Text>
+                </Pressable>
+              </View>
+            </View>
+          </View>
+        </Modal>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -386,4 +592,111 @@ const styles = StyleSheet.create({
   buttonSuccess: { backgroundColor: "#059669" },
   buttonDanger: { backgroundColor: "#DC2626" },
   buttonWarning: { backgroundColor: "#DC2626" },
+
+  // ------ modal / keypad styles ------
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.35)",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  modalCard: {
+    width: 320,
+    backgroundColor: "#ffffff",
+    borderRadius: 16,
+    paddingHorizontal: 24,
+    paddingVertical: 20,
+    alignItems: "center",
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: "600",
+    marginBottom: 8,
+    textAlign: "center",
+  },
+  modalMessage: {
+    fontSize: 14,
+    color: "#4b5563",
+    textAlign: "center",
+    marginBottom: 20,
+  },
+  modalButtonsRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    width: "100%",
+  },
+  modalBtn: {
+    flex: 1,
+    paddingVertical: 10,
+    borderRadius: 8,
+    alignItems: "center",
+    marginHorizontal: 4,
+  },
+  modalBtnPrimary: {
+    backgroundColor: "#000000",
+  },
+  modalBtnSecondary: {
+    backgroundColor: "#e5e7eb",
+  },
+  modalBtnTextPrimary: {
+    color: "#ffffff",
+    fontWeight: "600",
+    fontSize: 15,
+  },
+  modalBtnTextSecondary: {
+    color: "#111827",
+    fontWeight: "600",
+    fontSize: 15,
+  },
+  amountCard: {
+    width: 320,
+    backgroundColor: "#ffffff",
+    borderRadius: 16,
+    paddingHorizontal: 24,
+    paddingVertical: 20,
+    alignItems: "center",
+  },
+  amountDisplay: {
+    width: "100%",
+    paddingVertical: 12,
+    marginBottom: 12,
+    borderRadius: 8,
+    backgroundColor: "#f3f4f6",
+    alignItems: "center",
+  },
+  amountText: {
+    fontSize: 20,
+    fontWeight: "600",
+  },
+  keypadRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    width: "100%",
+    marginBottom: 6,
+  },
+  keypadKey: {
+    flex: 1,
+    marginHorizontal: 4,
+    paddingVertical: 12,
+    borderRadius: 8,
+    backgroundColor: "#e5e7eb",
+    alignItems: "center",
+  },
+  keypadKeyText: {
+    fontSize: 18,
+    fontWeight: "600",
+    color: "#111827",
+  },
+  doneButton: {
+    marginTop: 16,
+    paddingVertical: 10,
+    paddingHorizontal: 24,
+    alignItems: "center",
+  },
+  doneButtonText: {
+    fontSize: 18,
+    fontWeight: "600",
+    color: "#000",
+  },
+
 });

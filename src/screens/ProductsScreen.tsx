@@ -25,7 +25,7 @@ import { getTierPricingForIds } from '../services/tierPricing';
 import { usePriceTierStore, type PriceTier } from '../store/priceTierStore';
 import { useOrderTypeStore } from "../store/orderTypeStore";
 import { MaterialIcons } from "@expo/vector-icons";
-
+import { printReceiptForOrder, printKitchenTicket } from "../printing/printerService";
 
 type ProductSize = {
   id: string;
@@ -494,6 +494,8 @@ export default function ProductsScreen({
   online,
   tillOpen,
   setTillOpen,
+  activeOrderId,
+  setActiveOrderId,
 }: any) {
 
   const isOnline = online ?? true;
@@ -914,139 +916,113 @@ export default function ProductsScreen({
     };
   }, [online, categoryId]);
 
-  /* ------------------------ POS CONFIG (VAT, payments, discounts) ------------------------ */
-  useEffect(() => {
-    let mounted = true;
+    /* ------------------------ POS CONFIG (VAT, payments, discounts) ------------------------ */
+useEffect(() => {
+  let mounted = true;
 
-    async function loadConfig() {
-      try {
-        const branchRaw = await AsyncStorage.getItem('pos_branch');
-        let branchIdFromStorage: string | null = null;
-        if (branchRaw) {
-          try {
-            const b = JSON.parse(branchRaw);
-            branchIdFromStorage = b?.id ?? null;
-          } catch {
-            branchIdFromStorage = null;
-          }
-        }
+  async function loadConfig() {
+    try {
+      const cfg: any = await get("/pos/config");
+      console.log("📦 POS CONFIG (ProductsScreen):", cfg);
+      if (!mounted) return;
 
-        if (!branchIdFromStorage) {
-          const rawDev = await AsyncStorage.getItem('deviceInfo');
-          if (rawDev) {
-            try {
-              const d = JSON.parse(rawDev);
-              branchIdFromStorage = d?.branchId ?? d?.branch?.id ?? null;
-            } catch { }
-          }
-        }
+      // VAT
+      const vat = cfg?.vatRate;
+      if (typeof vat === "number") {
+        setVatRate(vat);
+      }
 
-        if (mounted) setActiveBranchId(branchIdFromStorage);
+      // PAYMENT METHODS  ➜ same behaviour as CategoryScreen
+      const methods = cfg?.paymentMethods;
+      if (Array.isArray(methods)) {
+        setPaymentMethods(
+          methods.map((m: any) => ({
+            id: String(m.id),
+            code: m.code ?? null,
+            name: String(m.name),
+          }))
+        );
+      }
 
-        const url = branchIdFromStorage
-          ? `/pos/config?branchId=${encodeURIComponent(branchIdFromStorage)}`
-          : '/pos/config';
+      // DISCOUNTS (keep your existing mapping logic)
+      const rawDiscounts = cfg?.discounts;
 
-        const cfg = await get(url);
-        if (!mounted) return;
+      if (Array.isArray(rawDiscounts)) {
+        const mapped: DiscountConfig[] = rawDiscounts.map((d: any) => {
+          const modeRaw = String(d.mode || d.type || "AMOUNT").toUpperCase();
+          const mode: "AMOUNT" | "PERCENT" = modeRaw.includes("PERCENT")
+            ? "PERCENT"
+            : "AMOUNT";
 
-        if ((cfg as any)?.error) {
-          console.log('POS CONFIG returned error:', (cfg as any).error);
-          return;
-        }
+          const scopeRaw = d.scope || d.applyTo || "ORDER";
+          const scope: "ORDER" | "ITEM" =
+            String(scopeRaw).toUpperCase() === "ITEM" ? "ITEM" : "ORDER";
 
-        const vat = (cfg as any)?.vatRate;
-        const methods = (cfg as any)?.paymentMethods;
+          const value = Number(d.value ?? d.amount ?? 0) || 0;
 
-        if (typeof vat === 'number') setVatRate(vat);
+          const branchIds: string[] = Array.isArray(d.branchIds)
+            ? d.branchIds.map((x: any) => String(x))
+            : [];
 
-        if (Array.isArray(methods)) {
-          setPaymentMethods(
-            methods.map((m: any) => ({
-              id: String(m.id),
-              code: m.code ?? null,
-              name: String(m.name),
-            })),
-          );
-        }
+          const categoryIds: string[] = Array.isArray(d.categoryIds)
+            ? d.categoryIds.map((x: any) => String(x))
+            : [];
 
-        const rawDiscounts = (cfg as any)?.discounts;
+          const productIds: string[] = Array.isArray(d.productIds)
+            ? d.productIds.map((x: any) => String(x))
+            : [];
 
-        if (Array.isArray(rawDiscounts)) {
-          const mapped: DiscountConfig[] = rawDiscounts.map((d: any) => {
-            const modeRaw = String(d.mode || d.type || 'AMOUNT').toUpperCase();
-            const mode: 'AMOUNT' | 'PERCENT' = modeRaw.includes('PERCENT')
-              ? 'PERCENT'
-              : 'AMOUNT';
+          const productSizeIds: string[] = Array.isArray(d.productSizeIds)
+            ? d.productSizeIds.map((x: any) => String(x))
+            : [];
 
-            const scopeRaw = d.scope || d.applyTo || 'ORDER';
-            const scope: 'ORDER' | 'ITEM' =
-              String(scopeRaw).toUpperCase() === 'ITEM' ? 'ITEM' : 'ORDER';
-
-            const value = Number(d.value ?? d.amount ?? 0) || 0;
-
-            const branchIds: string[] = Array.isArray(d.branchIds)
-              ? d.branchIds.map((x: any) => String(x))
-              : [];
-
-            const categoryIds: string[] = Array.isArray(d.categoryIds)
-              ? d.categoryIds.map((x: any) => String(x))
-              : [];
-
-            const productIds: string[] = Array.isArray(d.productIds)
-              ? d.productIds.map((x: any) => String(x))
-              : [];
-
-            const productSizeIds: string[] = Array.isArray(d.productSizeIds)
-              ? d.productSizeIds.map((x: any) => String(x))
-              : [];
-
-            const orderTypesRaw: string[] =
-              typeof d.orderTypes === 'string'
-                ? d.orderTypes
-                  .split(',')
+          const orderTypesRaw: string[] =
+            typeof d.orderTypes === "string"
+              ? d.orderTypes
+                  .split(",")
                   .map((s: any) => String(s).trim())
                   .filter(Boolean)
-                : Array.isArray(d.orderTypes)
-                  ? d.orderTypes.map((x: any) => String(x))
-                  : [];
+              : Array.isArray(d.orderTypes)
+              ? d.orderTypes.map((x: any) => String(x))
+              : [];
 
-            const orderTypes: string[] = orderTypesRaw
-              .map((x) => normalizeOrderTypeLabel(x))
-              .filter((x): x is string => !!x);
+          const orderTypes: string[] = orderTypesRaw
+            .map((x) => normalizeOrderTypeLabel(x))
+            .filter((x): x is string => !!x);
 
-            const applyAllBranches = !!d.applyAllBranches;
+          const applyAllBranches = !!d.applyAllBranches;
 
-            return {
-              id: String(d.id),
-              name: String(d.name || d.code || 'Discount'),
-              mode,
-              value,
-              scope,
-              branchIds,
-              categoryIds,
-              productIds,
-              productSizeIds,
-              orderTypes,
-              applyAllBranches,
-            };
-          });
+          return {
+            id: String(d.id),
+            name: String(d.name || d.code || "Discount"),
+            mode,
+            value,
+            scope,
+            branchIds,
+            categoryIds,
+            productIds,
+            productSizeIds,
+            orderTypes,
+            applyAllBranches,
+          };
+        });
 
-          setDiscountConfigs(mapped);
-        } else {
-          setDiscountConfigs([]);
-        }
-      } catch (err) {
-        console.log('POS CONFIG ERR (network/wrapper):', err);
+        setDiscountConfigs(mapped);
+      } else {
+        setDiscountConfigs([]);
       }
+    } catch (err) {
+      console.log("POS CONFIG ERR (ProductsScreen):", err);
     }
+  }
 
-    loadConfig();
-    return () => {
-      mounted = false;
-    };
-  }, []);
+  loadConfig();
+  return () => {
+    mounted = false;
+  };
+}, []);
 
+  
   /* ------------------------ SYNC PriceTier ------------------------ */
   useEffect(() => {
     let mounted = true;
@@ -1663,26 +1639,22 @@ export default function ProductsScreen({
     if (remaining > 0.01) return;
     if (!payments.length) return;
     if (!ensureBrandAndDevice()) return;
-
+  
     try {
       setPaying(true);
-
+  
       const discountPayload = appliedDiscount
         ? {
-          kind: appliedDiscount.kind,
-          value: appliedDiscount.value,
-          amount: discountAmount,
-          source: appliedDiscount.source,
-          name: appliedDiscount.name ?? null,
-          configId: appliedDiscount.id ?? null,
-          scope: appliedDiscount.scope ?? null,
-        }
+            kind: appliedDiscount.kind,
+            value: appliedDiscount.value,
+            amount: discountAmount,
+          }
         : null;
-
+  
       const basePayload: any = {
         brandId,
         deviceId,
-
+  
         vatRate,
         subtotalEx,
         vatAmount,
@@ -1700,21 +1672,27 @@ export default function ProductsScreen({
           modifiers:
             i.modifiers && i.modifiers.length > 0
               ? i.modifiers.map((m) => ({
-                modifierItemId: m.itemId,
-                price: m.price,
-                qty: 1,
-              }))
+                  modifierItemId: m.itemId,
+                  price: m.price,
+                  qty: 1,
+                }))
               : [],
         })),
         payments,
       };
-
+  
       if (selectedCustomer?.id) {
         basePayload.customerId = String(selectedCustomer.id);
       }
-
+  
+      // 🔹 Capture response / orderNo for printing
+      let orderNoForReceipt: string | null = null;
+  
       if (activeOrderId) {
-        await post(`/orders/${activeOrderId}/close`, basePayload);
+        const resp = await post(`/orders/${activeOrderId}/close`, basePayload);
+        orderNoForReceipt = resp?.orderNo
+          ? String(resp.orderNo)
+          : String(activeOrderId);
       } else {
         const payload = {
           branchName,
@@ -1722,16 +1700,59 @@ export default function ProductsScreen({
           status: 'CLOSED',
           ...basePayload,
         };
-        await post('/pos/orders', payload);
+  
+        const resp = await post('/pos/orders', payload);
+        orderNoForReceipt = resp?.orderNo ? String(resp.orderNo) : null;
       }
-
+  
+      // 🔹 Auto-print after successful payment
+      try {
+        await printReceiptForOrder({
+          brandName,
+          branchName,
+          userName,
+          orderNo: orderNoForReceipt,
+          orderType: orderType || null,
+          businessDate: new Date(),
+  
+          cart: cart as CartItem[],
+          subtotal: subtotalEx,
+          vatAmount,
+          total: netTotal,
+          discountAmount,
+          payments: payments.map((p) => ({
+            methodName: p.methodName,
+            amount: p.amount,
+          })),
+        });
+      } catch (printErr) {
+        console.log('⚠️ printReceiptForOrder error (ignored):', printErr);
+      }
+      //  Auto-print kitchen ticket (for KITCHEN printers)
+      try {
+        await printKitchenTicket({
+          brandName,
+          branchName,
+          userName,                     
+          orderNo: orderNoForReceipt,
+          orderType: orderType || null,
+          businessDate: new Date(), 
+          tableName: null,
+          notes: null,
+          cart: cart as CartItem[],
+        });
+      } catch (kErr) {
+        console.log("⚠️ printKitchenTicket error (ignored):", kErr);
+      }
+    
+      // 🔁 Reset UI after payment
       setCart([]);
       setPayments([]);
       setOrderType(null);
       setActiveOrderId(null);
       setSelectedCustomer(null);
       setAppliedDiscount(null);
-
+  
       await syncOrdersCache();
     } catch (err) {
       console.log('PAY /orders/:id/close ERROR (ProductsScreen)', err);
@@ -1739,7 +1760,7 @@ export default function ProductsScreen({
       setPaying(false);
     }
   }
-
+  
   async function handleNewOrder() {
     if (readOnlyCart) return;
     const cartItems = cart as CartItem[];
@@ -2014,17 +2035,53 @@ export default function ProductsScreen({
     }
   }
 
+  async function handlePrintCurrentOrder() {
+    try {
+      const cartItems = cart as any[];
+      if (!Array.isArray(cartItems) || cartItems.length === 0) {
+        console.log("No items in cart to print");
+        return;
+      }
+  
+      await printReceiptForOrder({
+        brandName,
+        branchName,
+        userName,
+        orderNo: null, // if you have last orderNo in state, pass it here
+        orderType,
+        businessDate: new Date(),
+  
+        cart: cartItems,
+        subtotal: subtotalEx,
+        vatAmount,
+        total: netTotal,
+        discountAmount,
+        payments: payments.map((p: any) => ({
+          methodName: p.methodName || p.methodLabel || p.name || "Payment",
+          amount: Number(p.amount || 0),
+        })),
+      });
+    } catch (e) {
+      console.log("handlePrintCurrentOrder error", e);
+    }
+  }
+  
+
   const actions: ActionButton[] = [
     {
       label: 'Price Tag',
       visible: true,
       onPress: async () => {
         if (readOnlyCart) return;
-        setTierModalVisible(true); // ✅ Open modal first (no white screen) and show globally active tier
+        setTierModalVisible(true);
         await loadTiers();
       },
     },
-    { label: 'Print', onPress: () => console.log('PRINT'), visible: true },
+    {
+      label: 'Print',
+      onPress: handlePrintCurrentOrder,   // ✅ use our helper
+      visible: true,
+    },
     { label: 'Kitchen', onPress: () => console.log('KITCHEN'), visible: true },
     {
       label: 'Void',
@@ -3196,7 +3253,13 @@ export default function ProductsScreen({
             </Pressable>
 
             {/* 6) Devices */}
-            <Pressable style={styles.homeMenuItem} onPress={() => { }}>
+            <Pressable
+              style={styles.homeMenuItem}
+              onPress={() => {
+                setHomeMenuVisible(false);
+                navigation.navigate("Devices");
+              }}
+            >
               <MaterialIcons
                 name="devices"
                 size={20}
