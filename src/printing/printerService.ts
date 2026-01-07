@@ -18,6 +18,12 @@ export type StoredDevice = {
   name: string;
   ip: string;
   enabledOrderTypes: string[]; // e.g. ["DINE_IN","DELIVERY"]
+
+  // NEW: routing filters (stored as CSV of IDs)
+  // category ids from your local menu
+  categoryFilter?: string | null;
+  // product ids from your local menu
+  productFilter?: string | null;
 };
 
 export type ReceiptPrintArgs = BuildReceiptArgs;
@@ -57,9 +63,7 @@ function chooseReceiptPrinter(
   // Try match by orderType + Cashier type
   if (orderType) {
     const match = printers.find(
-      (d) =>
-        d.typeLabel === "Cashier" &&
-        matchesOrderType(d, orderType)
+      (d) => d.typeLabel === "Cashier" && matchesOrderType(d, orderType)
     );
     if (match) return match;
   }
@@ -80,11 +84,55 @@ function chooseKitchenPrinters(
   orderType?: string | null
 ): StoredDevice[] {
   return printers.filter((d) => {
-    const isKitchenType =
-      d.typeLabel === "Kitchen" || d.typeLabel === "Kitchen Sticky Printer";
+    const label = (d.typeLabel || "").toLowerCase();
+    const isKitchenType = label.includes("kitchen"); // Kitchen, Kitchen Sticky Printer, etc.
     if (!isKitchenType) return false;
     return matchesOrderType(d, orderType);
   });
+}
+
+// ---------- Filters for kitchen routing -----------------
+
+function parseCsv(value?: string | null): string[] {
+  if (!value) return [];
+  return value
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Decide if a single cart item should be printed on a given printer.
+ * Priority:
+ *  1) If printer has productFilter -> only those products
+ *  2) Else if printer has categoryFilter -> only those categories
+ *  3) Else -> everything
+ */
+function itemMatchesPrinterFilters(
+  item: any,
+  printer: StoredDevice
+): boolean {
+  const productIds = parseCsv(printer.productFilter);
+  const categoryIds = parseCsv(printer.categoryFilter);
+
+  // Product filter has priority
+  if (productIds.length) {
+    const itemProductId =
+      item.productId ?? item.productID ?? item.product_id ?? null;
+    if (!itemProductId) return false;
+    return productIds.includes(String(itemProductId));
+  }
+
+  // Category filter as fallback
+  if (categoryIds.length) {
+    const itemCategoryId =
+      item.categoryId ?? item.categoryID ?? item.category_id ?? null;
+    if (!itemCategoryId) return false;
+    return categoryIds.includes(String(itemCategoryId));
+  }
+
+  // No filters configured => match everything
+  return true;
 }
 
 // ---------- Transport (stub for now) -----------------
@@ -129,7 +177,7 @@ export async function printReceiptForOrder(args: ReceiptPrintArgs) {
 }
 
 /**
- * Kitchen ticket – ALL kitchen printers that match order type.
+ * Kitchen ticket – ALL kitchen printers that match order type + filters.
  */
 export async function printKitchenTicket(args: KitchenPrintArgs) {
   try {
@@ -141,9 +189,26 @@ export async function printKitchenTicket(args: KitchenPrintArgs) {
       return;
     }
 
-    const text = buildKitchenTicketText(args);
+    const fullCart: any[] = Array.isArray(args.cart) ? args.cart : [];
 
     for (const p of kitchenPrinters) {
+      const filteredCart = fullCart.filter((item) =>
+        itemMatchesPrinterFilters(item, p)
+      );
+
+      const hasFilters =
+        parseCsv(p.productFilter).length || parseCsv(p.categoryFilter).length;
+
+      // If printer has filters but nothing matches, skip it
+      if (hasFilters && filteredCart.length === 0) {
+        continue;
+      }
+
+      const text = buildKitchenTicketText({
+        ...args,
+        cart: hasFilters ? filteredCart : fullCart,
+      });
+
       await sendToPrinter(p, text);
     }
   } catch (e) {

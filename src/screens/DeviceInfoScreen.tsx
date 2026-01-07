@@ -12,6 +12,10 @@ import {
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { MaterialIcons } from "@expo/vector-icons";
 
+// 🔹 menu + db helpers (already used elsewhere in your app)
+import { getLocalCategories } from "../database/menu";
+import { getDb } from "../database/db";
+
 const STORAGE_KEY = "pos_devices";
 
 const PRINTER_MODELS = [
@@ -51,7 +55,13 @@ type Props = {
   route: { params: DeviceInfoRouteParams };
 };
 
-type SubScreen = "MAIN" | "MODEL" | "TYPE" | "ORDER_TYPES";
+type SubScreen =
+  | "MAIN"
+  | "MODEL"
+  | "TYPE"
+  | "ORDER_TYPES"
+  | "CATEGORY_FILTER"
+  | "PRODUCT_FILTER";
 
 type StoredDevice = {
   id: string;
@@ -61,6 +71,21 @@ type StoredDevice = {
   name: string;
   ip: string;
   enabledOrderTypes: string[]; // codes
+
+  // filters stored as CSV of IDs
+  categoryFilter?: string | null; // category ids
+  productFilter?: string | null; // product ids
+};
+
+type LocalCategory = {
+  id: string;
+  name: string;
+};
+
+type LocalProduct = {
+  id: string;
+  name: string;
+  categoryId: string | null;
 };
 
 export default function DeviceInfoScreen({ navigation, route }: Props) {
@@ -75,7 +100,50 @@ export default function DeviceInfoScreen({ navigation, route }: Props) {
   const [typeLabel, setTypeLabel] = useState<string | null>(null);
   const [name, setName] = useState<string>("");
   const [ip, setIp] = useState<string>("");
+
   const [enabledOrderTypes, setEnabledOrderTypes] = useState<string[]>([]);
+
+  // 🔹 full menu data
+  const [allCategories, setAllCategories] = useState<LocalCategory[]>([]);
+  const [allProducts, setAllProducts] = useState<LocalProduct[]>([]);
+
+  // 🔹 selected filters (IDs)
+  const [selectedCategoryIds, setSelectedCategoryIds] = useState<string[]>([]);
+  const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
+
+  // ===== Load menu data (categories + products) =======================
+  useEffect(() => {
+    async function loadMenuData() {
+      try {
+        // categories from local menu helper
+        const cats = await getLocalCategories();
+        setAllCategories(
+          (cats || []).map((c: any) => ({
+            id: String(c.id),
+            name: String(c.name),
+          }))
+        );
+
+        // products directly from SQLite
+        const db = await getDb();
+        const rows = (await db.getAllAsync(
+          "SELECT id, name, categoryId FROM products WHERE isActive = 1 ORDER BY name"
+        )) as any[];
+
+        setAllProducts(
+          (rows || []).map((p: any) => ({
+            id: String(p.id),
+            name: String(p.name),
+            categoryId: p.categoryId ? String(p.categoryId) : null,
+          }))
+        );
+      } catch (e) {
+        console.log("loadMenuData error", e);
+      }
+    }
+
+    loadMenuData();
+  }, []);
 
   // ===== Load existing device when editing ==========================
   useEffect(() => {
@@ -93,6 +161,24 @@ export default function DeviceInfoScreen({ navigation, route }: Props) {
         setName(found.name || "");
         setIp(found.ip || "");
         setEnabledOrderTypes(found.enabledOrderTypes || []);
+
+        // parse CSV -> arrays
+        if (found.categoryFilter) {
+          setSelectedCategoryIds(
+            found.categoryFilter
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean)
+          );
+        }
+        if (found.productFilter) {
+          setSelectedProductIds(
+            found.productFilter
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean)
+          );
+        }
       } catch (e) {
         console.log("loadForEdit error", e);
       }
@@ -109,6 +195,18 @@ export default function DeviceInfoScreen({ navigation, route }: Props) {
     );
   }
 
+  function toggleCategory(id: string) {
+    setSelectedCategoryIds((prev) =>
+      prev.includes(id) ? prev.filter((c) => c !== id) : [...prev, id]
+    );
+  }
+
+  function toggleProduct(id: string) {
+    setSelectedProductIds((prev) =>
+      prev.includes(id) ? prev.filter((p) => p !== id) : [...prev, id]
+    );
+  }
+
   function getEnabledTypesLabel() {
     if (!enabledOrderTypes || enabledOrderTypes.length === 0) return "Not set";
 
@@ -119,6 +217,22 @@ export default function DeviceInfoScreen({ navigation, route }: Props) {
     return labels.join(", ");
   }
 
+  function getCategoryFilterLabel() {
+    if (!selectedCategoryIds.length) return "All categories";
+    const names = allCategories
+      .filter((c) => selectedCategoryIds.includes(c.id))
+      .map((c) => c.name);
+    return names.join(", ");
+  }
+
+  function getProductFilterLabel() {
+    if (!selectedProductIds.length) return "All products";
+    const names = allProducts
+      .filter((p) => selectedProductIds.includes(p.id))
+      .map((p) => p.name);
+    return names.join(", ");
+  }
+
   const headerTitle =
     subScreen === "MAIN"
       ? "Printer Info"
@@ -126,7 +240,11 @@ export default function DeviceInfoScreen({ navigation, route }: Props) {
       ? "Model"
       : subScreen === "TYPE"
       ? "Type"
-      : "Enabled order types";
+      : subScreen === "ORDER_TYPES"
+      ? "Enabled order types"
+      : subScreen === "CATEGORY_FILTER"
+      ? "Category filter"
+      : "Product filter";
 
   const showSave = subScreen === "MAIN";
 
@@ -145,6 +263,11 @@ export default function DeviceInfoScreen({ navigation, route }: Props) {
       const raw = await AsyncStorage.getItem(STORAGE_KEY);
       const list: StoredDevice[] = raw ? JSON.parse(raw) : [];
 
+      const categoryFilter =
+        selectedCategoryIds.length > 0 ? selectedCategoryIds.join(",") : "";
+      const productFilter =
+        selectedProductIds.length > 0 ? selectedProductIds.join(",") : "";
+
       let nextList: StoredDevice[];
 
       if (mode === "edit" && deviceId) {
@@ -156,6 +279,8 @@ export default function DeviceInfoScreen({ navigation, route }: Props) {
           name,
           ip,
           enabledOrderTypes,
+          categoryFilter,
+          productFilter,
         };
         nextList = list.map((d) => (d.id === deviceId ? updated : d));
       } else {
@@ -168,6 +293,8 @@ export default function DeviceInfoScreen({ navigation, route }: Props) {
           name,
           ip,
           enabledOrderTypes,
+          categoryFilter,
+          productFilter,
         };
         nextList = [...list, item];
       }
@@ -284,6 +411,56 @@ export default function DeviceInfoScreen({ navigation, route }: Props) {
               />
             </View>
 
+            {/* Category filter row */}
+            <Pressable
+              style={styles.row}
+              onPress={() => setSubScreen("CATEGORY_FILTER")}
+            >
+              <Text style={styles.rowLabel}>Category filter</Text>
+              <View style={styles.rowRight}>
+                <Text
+                  style={[
+                    styles.rowValue,
+                    !selectedCategoryIds.length &&
+                      styles.placeholderText,
+                  ]}
+                  numberOfLines={1}
+                >
+                  {getCategoryFilterLabel()}
+                </Text>
+                <MaterialIcons
+                  name="chevron-right"
+                  size={20}
+                  color="#9ca3af"
+                />
+              </View>
+            </Pressable>
+
+            {/* Product filter row */}
+            <Pressable
+              style={styles.row}
+              onPress={() => setSubScreen("PRODUCT_FILTER")}
+            >
+              <Text style={styles.rowLabel}>Product filter</Text>
+              <View style={styles.rowRight}>
+                <Text
+                  style={[
+                    styles.rowValue,
+                    !selectedProductIds.length &&
+                      styles.placeholderText,
+                  ]}
+                  numberOfLines={1}
+                >
+                  {getProductFilterLabel()}
+                </Text>
+                <MaterialIcons
+                  name="chevron-right"
+                  size={20}
+                  color="#9ca3af"
+                />
+              </View>
+            </Pressable>
+
             {/* Enabled order types */}
             <Pressable
               style={styles.row}
@@ -382,6 +559,86 @@ export default function DeviceInfoScreen({ navigation, route }: Props) {
             />
           </View>
         )}
+
+        {/* CATEGORY FILTER -------------------------------------------- */}
+        {subScreen === "CATEGORY_FILTER" && (
+          <View style={{ flex: 1 }}>
+            <View style={styles.sectionHeaderRow}>
+              <Text style={styles.sectionHeader}>
+                SELECT CATEGORIES FOR THIS PRINTER
+              </Text>
+            </View>
+            <FlatList
+              data={allCategories}
+              keyExtractor={(c) => c.id}
+              ItemSeparatorComponent={() => <View style={styles.separator} />}
+              renderItem={({ item }) => {
+                const active = selectedCategoryIds.includes(item.id);
+                return (
+                  <Pressable
+                    style={styles.row}
+                    onPress={() => toggleCategory(item.id)}
+                  >
+                    <Text style={styles.rowLabel}>{item.name}</Text>
+                    {active && (
+                      <MaterialIcons
+                        name="check"
+                        size={20}
+                        color="#10b981"
+                      />
+                    )}
+                  </Pressable>
+                );
+              }}
+            />
+          </View>
+        )}
+
+        {/* PRODUCT FILTER --------------------------------------------- */}
+        {subScreen === "PRODUCT_FILTER" && (
+          <View style={{ flex: 1 }}>
+            <View style={styles.sectionHeaderRow}>
+              <Text style={styles.sectionHeader}>
+                SELECT PRODUCTS FOR THIS PRINTER
+              </Text>
+            </View>
+            <FlatList
+              data={allProducts}
+              keyExtractor={(p) => p.id}
+              ItemSeparatorComponent={() => <View style={styles.separator} />}
+              renderItem={({ item }) => {
+                const active = selectedProductIds.includes(item.id);
+                const catName =
+                  allCategories.find((c) => c.id === item.categoryId)?.name ||
+                  "";
+                return (
+                  <Pressable
+                    style={styles.row}
+                    onPress={() => toggleProduct(item.id)}
+                  >
+                    <View>
+                      <Text style={styles.rowLabel}>{item.name}</Text>
+                      {!!catName && (
+                        <Text
+                          style={{ fontSize: 12, color: "#9ca3af" }}
+                        >
+                          {catName}
+                        </Text>
+                      )}
+                    </View>
+                    {active && (
+                      <MaterialIcons
+                        name="check"
+                        size={20}
+                        color="#10b981"
+                      />
+                    )}
+                  </Pressable>
+                );
+              }}
+            />
+          </View>
+        )}
       </View>
     </SafeAreaView>
   );
@@ -441,6 +698,7 @@ const styles = StyleSheet.create({
   rowRight: {
     flexDirection: "row",
     alignItems: "center",
+    maxWidth: "60%",
   },
   rowValue: {
     fontSize: 14,
