@@ -77,7 +77,7 @@ export default function ActivateScreen({ navigation }: any) {
       };
 
       const r: any = await post('/devices/pos/activate', payload);
-      console.log('✅ ACTIVATE RESPONSE:', JSON.stringify(r, null, 2));
+      
 
       // 🔐 Save device token
       if (r?.token) {

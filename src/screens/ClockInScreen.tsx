@@ -7,7 +7,6 @@ import {
   SafeAreaView,
   StyleSheet,
   TextInput,
-  Alert,
   KeyboardAvoidingView,
   Platform,
   Modal,
@@ -18,11 +17,24 @@ import {
   closeLocalShift,
   createLocalTill,
   closeLocalTill,
+  getLocalTillSession,
 } from "../database/clockLocal";
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import NetInfo from "@react-native-community/netinfo";
 import { post } from "../lib/api";
+
+// ✅ NEW: report + print
+import { generateTillCloseReport } from "../reports/tillCloseReport";
+
+// ✅ NEW: printing
+import {
+  printTillCloseReport,
+  type TillCloseReport,
+} from "../printing/printerService";
+
+// ✅ Modern popup
+import ModernDialog from "../components/ModernDialog";
 
 type Props = {
   navigation: any;
@@ -42,11 +54,30 @@ export default function ClockInScreen({ navigation, route }: Props) {
   const [brandId, setBrandId] = useState<string | null>(null);
   const [deviceId, setDeviceId] = useState<string | null>(null);
 
-  // ===== NEW: state for close-till flow =====
+  // ===== close-till flow =====
   const [confirmCloseVisible, setConfirmCloseVisible] = useState(false);
   const [closeAmountVisible, setCloseAmountVisible] = useState(false);
   const [printPromptVisible, setPrintPromptVisible] = useState(false);
   const [tillCloseAmount, setTillCloseAmount] = useState("");
+
+  // ✅ hold report for printing
+  const [lastReport, setLastReport] = useState<TillCloseReport | null>(null);
+
+  // ✅ Modern dialog state
+  const [dialog, setDialog] = useState({
+    visible: false,
+    title: "",
+    message: "",
+    tone: "info" as "info" | "success" | "error",
+  });
+
+  function showDialog(
+    tone: "info" | "success" | "error",
+    title: string,
+    message: string
+  ) {
+    setDialog({ visible: true, tone, title, message });
+  }
 
   // Restore flags
   useEffect(() => {
@@ -94,19 +125,18 @@ export default function ClockInScreen({ navigation, route }: Props) {
     const net = await NetInfo.fetch();
     const isOnline = !!net.isConnected && !!net.isInternetReachable;
 
-    // ------------- CLOCK IN -------------
+    // CLOCK IN
     if (!clockedIn) {
       if (!branchId) {
-        Alert.alert("Missing branch", "Device must be activated again.");
+        showDialog("error", "Missing branch", "Device must be activated again.");
         return;
       }
 
       try {
         setLoading(true);
 
-        // 1️⃣ ALWAYS create local shift first
         const localShiftId = await createLocalShift({
-          userName,
+          userId: userName, // keep your current idea
           branchId,
           brandId,
           deviceId,
@@ -116,25 +146,20 @@ export default function ClockInScreen({ navigation, route }: Props) {
         await AsyncStorage.setItem("pos_clocked_in", "1");
         setClockedIn(true);
 
-        // 2️⃣ Try sync (optional if online)
         if (isOnline) {
           try {
-            const res: any = await post("/pos/clock-in", {
+            await post("/pos/clock-in", {
               branchId,
               brandId,
               deviceId,
               clientId: localShiftId,
             });
-
-            // Mark synced in DB
-            await closeLocalShift(localShiftId, {
-              syncOnly: true,
-              serverId: res?.shiftId,
-            });
-          } catch {}
+          } catch (e) {
+            console.log("❌ clock-in sync failed", e);
+          }
         }
       } catch (e: any) {
-        Alert.alert("Clock In failed", e?.message || "Try again.");
+        showDialog("error", "Clock In failed", e?.message || "Try again.");
       } finally {
         setLoading(false);
       }
@@ -142,9 +167,9 @@ export default function ClockInScreen({ navigation, route }: Props) {
       return;
     }
 
-    // ------------- CLOCK OUT -------------
+    // CLOCK OUT
     if (tillOpened) {
-      Alert.alert("Close Till", "Close the till before clocking out.");
+      showDialog("info", "Close Till", "Close the till before clocking out.");
       return;
     }
 
@@ -152,8 +177,6 @@ export default function ClockInScreen({ navigation, route }: Props) {
       setLoading(true);
 
       const shiftId = await AsyncStorage.getItem("pos_shift_id");
-
-      // local update always succeeds
       await closeLocalShift(shiftId || undefined);
 
       await AsyncStorage.multiRemove(["pos_clocked_in", "pos_shift_id"]);
@@ -162,10 +185,12 @@ export default function ClockInScreen({ navigation, route }: Props) {
       if (isOnline) {
         try {
           await post("/pos/clock-out", { branchId, brandId, deviceId });
-        } catch {}
+        } catch (e) {
+          console.log("❌ clock-out sync failed", e);
+        }
       }
     } catch (e: any) {
-      Alert.alert("Clock Out failed", e?.message || "Try again.");
+      showDialog("error", "Clock Out failed", e?.message || "Try again.");
     } finally {
       setLoading(false);
     }
@@ -173,7 +198,6 @@ export default function ClockInScreen({ navigation, route }: Props) {
 
   /* ================= TILL ================= */
 
-  // Real close logic (called after amount is entered)
   async function actuallyCloseTill(closingCash: number) {
     const net = await NetInfo.fetch();
     const isOnline = !!net.isConnected && !!net.isInternetReachable;
@@ -181,32 +205,64 @@ export default function ClockInScreen({ navigation, route }: Props) {
     try {
       setLoading(true);
 
-      const t = await AsyncStorage.getItem("pos_till_session_id");
-      await closeLocalTill(t || undefined);
+      const localTillId = await AsyncStorage.getItem("pos_till_session_id");
+      if (!localTillId) throw new Error("Missing till session id");
 
+      // ✅ 1) save till close in local DB
+      await closeLocalTill(localTillId, closingCash);
+
+      // ✅ 2) load session for report
+      const session = await getLocalTillSession(localTillId);
+
+      // ✅ 3) generate report
+      const openedAt = String(session.openedAt);
+      const closedAt = String(session.closedAt || new Date().toISOString());
+
+      const report = await generateTillCloseReport({
+        tillSessionId: localTillId,
+        branchId,
+        brandId,
+        deviceId,
+        branchName,
+        userName,
+        openingCash: Number(session.openingCash || 0),
+        closingCash: Number(session.closingCash || closingCash),
+        openedAt,
+        closedAt,
+      });
+
+      setLastReport(report);
+
+      // ✅ 4) clear flags
       await AsyncStorage.multiSet([
         ["pos_till_opened", "0"],
         ["pos_till_session_id", ""],
       ]);
+
       setTillOpened(false);
       setOpeningAmount("");
       setTillCloseAmount("");
 
+      // ✅ 5) sync to server
       if (isOnline) {
         try {
           await post("/pos/till/close", {
             branchId,
             brandId,
             deviceId,
-            closingCash, // 🧮 cash sales amount
+            clientId: localTillId,
+            closingCash,
+            report,
           });
-        } catch {}
+        } catch (e) {
+          console.log("❌ till close sync failed", e);
+        }
       }
 
-      // show print-report prompt
+      // ✅ 6) show print prompt
       setPrintPromptVisible(true);
     } catch (e: any) {
-      Alert.alert("Till close failed", e?.message || "Try again.");
+      showDialog("error", "Till close failed", e?.message || "Try again.");
     } finally {
       setLoading(false);
     }
@@ -214,15 +270,15 @@ export default function ClockInScreen({ navigation, route }: Props) {
 
   async function handleToggleTill() {
     if (!clockedIn) {
-      Alert.alert("Clock In required");
+      showDialog("info", "Clock In required", "Please clock in first.");
       return;
     }
 
-    // ====== OPEN TILL ======
+    // OPEN TILL
     if (!tillOpened) {
       const amount = Number(openingAmount.trim());
       if (!amount) {
-        Alert.alert("Enter opening cash");
+        showDialog("info", "Opening cash", "Enter opening cash.");
         return;
       }
 
@@ -232,7 +288,10 @@ export default function ClockInScreen({ navigation, route }: Props) {
       try {
         setLoading(true);
 
+        const shiftLocalId = await AsyncStorage.getItem("pos_shift_id");
+
         const localTillId = await createLocalTill({
+          shiftLocalId: shiftLocalId || null,
           branchId,
           brandId,
           deviceId,
@@ -252,7 +311,9 @@ export default function ClockInScreen({ navigation, route }: Props) {
               deviceId,
               clientId: localTillId,
             });
-          } catch {}
+          } catch (e) {
+            console.log("❌ till open sync failed", e);
+          }
         }
       } finally {
         setLoading(false);
@@ -261,7 +322,7 @@ export default function ClockInScreen({ navigation, route }: Props) {
       return;
     }
 
-    // ====== CLOSE TILL (start flow with confirmation popup) ======
+    // CLOSE TILL - start confirmation flow
     setConfirmCloseVisible(true);
   }
 
@@ -281,11 +342,20 @@ export default function ClockInScreen({ navigation, route }: Props) {
     ]).finally(() => navigation.replace("Home"));
   }
 
-  function handlePrintTillReport(shouldPrint: boolean) {
+  async function handlePrintTillReport(shouldPrint: boolean) {
     setPrintPromptVisible(false);
-    if (shouldPrint) {
-      // TODO: hook up real printer call here
-      Alert.alert("Till Report", "Send till report to printer here.");
+    if (!shouldPrint) return;
+
+    try {
+      if (!lastReport) {
+        showDialog("info", "No report", "Till report was not generated.");
+        return;
+      }
+
+      await printTillCloseReport(lastReport);
+      showDialog("success", "Printed", "Till report sent to printer.");
+    } catch (e: any) {
+      showDialog("error", "Print failed", e?.message || "Try again");
     }
   }
 
@@ -299,8 +369,6 @@ export default function ClockInScreen({ navigation, route }: Props) {
     setTillCloseAmount((prev) => (prev || "") + key);
   }
 
-  /* ------------- RENDER ------------- */
-
   return (
     <SafeAreaView style={styles.container}>
       <KeyboardAvoidingView
@@ -312,9 +380,7 @@ export default function ClockInScreen({ navigation, route }: Props) {
         {!!branchName && (
           <Text style={styles.branchText}>Branch: {branchName}</Text>
         )}
-        {!!userName && (
-          <Text style={styles.branchText}>User: {userName}</Text>
-        )}
+        {!!userName && <Text style={styles.branchText}>User: {userName}</Text>}
 
         <Text style={styles.welcome}>Welcome, Cashier!</Text>
         <Text style={styles.subText}>
@@ -389,8 +455,6 @@ export default function ClockInScreen({ navigation, route }: Props) {
           <Text style={styles.exitText}>Exit</Text>
         </Pressable>
 
-        {/* ===== MODALS ===== */}
-
         {/* 1) Confirm Close Till */}
         <Modal
           visible={confirmCloseVisible}
@@ -428,7 +492,7 @@ export default function ClockInScreen({ navigation, route }: Props) {
           </View>
         </Modal>
 
-        {/* 2) Enter Till Amount (numeric keypad) */}
+        {/* 2) Enter Till Amount */}
         <Modal
           visible={closeAmountVisible}
           transparent
@@ -491,28 +555,28 @@ export default function ClockInScreen({ navigation, route }: Props) {
               </View>
 
               <Pressable
-  style={styles.doneButton}
-  onPress={() => {
-    if (!tillCloseAmount) {
-      Alert.alert("Enter till amount");
-      return;
-    }
-    const val = Number(tillCloseAmount);
-    if (Number.isNaN(val)) {
-      Alert.alert("Invalid amount");
-      return;
-    }
-    setCloseAmountVisible(false);
-    actuallyCloseTill(val);
-  }}
->
-  <Text style={styles.doneButtonText}>Done</Text>
-</Pressable>
+                style={styles.doneButton}
+                onPress={() => {
+                  if (!tillCloseAmount) {
+                    showDialog("info", "Till amount", "Enter till amount.");
+                    return;
+                  }
+                  const val = Number(tillCloseAmount);
+                  if (Number.isNaN(val)) {
+                    showDialog("error", "Invalid amount", "Please enter a valid number.");
+                    return;
+                  }
+                  setCloseAmountVisible(false);
+                  actuallyCloseTill(val);
+                }}
+              >
+                <Text style={styles.doneButtonText}>Done</Text>
+              </Pressable>
             </View>
           </View>
         </Modal>
 
-        {/* 3) Till closed successfully + print prompt */}
+        {/* 3) Print prompt */}
         <Modal
           visible={printPromptVisible}
           transparent
@@ -523,8 +587,7 @@ export default function ClockInScreen({ navigation, route }: Props) {
             <View style={styles.modalCard}>
               <Text style={styles.modalTitle}>Till Closed Successfully!</Text>
               <Text style={styles.modalMessage}>
-                Till closed successfully! Would you like to print the till
-                report?
+                Till closed successfully! Would you like to print the till report?
               </Text>
 
               <View style={styles.modalButtonsRow}>
@@ -534,6 +597,7 @@ export default function ClockInScreen({ navigation, route }: Props) {
                 >
                   <Text style={styles.modalBtnTextPrimary}>Yes</Text>
                 </Pressable>
+
                 <Pressable
                   style={[styles.modalBtn, styles.modalBtnSecondary]}
                   onPress={() => handlePrintTillReport(false)}
@@ -544,6 +608,17 @@ export default function ClockInScreen({ navigation, route }: Props) {
             </View>
           </View>
         </Modal>
+
+        {/* ✅ Modern dialog (replaces Alert.alert look) */}
+        <ModernDialog
+          visible={dialog.visible}
+          tone={dialog.tone}
+          title={dialog.title}
+          message={dialog.message}
+          primaryText="Done"
+          onPrimary={() => setDialog((p) => ({ ...p, visible: false }))}
+          onClose={() => setDialog((p) => ({ ...p, visible: false }))}
+        />
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -593,7 +668,6 @@ const styles = StyleSheet.create({
   buttonDanger: { backgroundColor: "#DC2626" },
   buttonWarning: { backgroundColor: "#DC2626" },
 
-  // ------ modal / keypad styles ------
   modalOverlay: {
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.35)",
@@ -632,22 +706,11 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginHorizontal: 4,
   },
-  modalBtnPrimary: {
-    backgroundColor: "#000000",
-  },
-  modalBtnSecondary: {
-    backgroundColor: "#e5e7eb",
-  },
-  modalBtnTextPrimary: {
-    color: "#ffffff",
-    fontWeight: "600",
-    fontSize: 15,
-  },
-  modalBtnTextSecondary: {
-    color: "#111827",
-    fontWeight: "600",
-    fontSize: 15,
-  },
+  modalBtnPrimary: { backgroundColor: "#000000" },
+  modalBtnSecondary: { backgroundColor: "#e5e7eb" },
+  modalBtnTextPrimary: { color: "#ffffff", fontWeight: "600", fontSize: 15 },
+  modalBtnTextSecondary: { color: "#111827", fontWeight: "600", fontSize: 15 },
+
   amountCard: {
     width: 320,
     backgroundColor: "#ffffff",
@@ -664,10 +727,7 @@ const styles = StyleSheet.create({
     backgroundColor: "#f3f4f6",
     alignItems: "center",
   },
-  amountText: {
-    fontSize: 20,
-    fontWeight: "600",
-  },
+  amountText: { fontSize: 20, fontWeight: "600" },
   keypadRow: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -682,21 +742,12 @@ const styles = StyleSheet.create({
     backgroundColor: "#e5e7eb",
     alignItems: "center",
   },
-  keypadKeyText: {
-    fontSize: 18,
-    fontWeight: "600",
-    color: "#111827",
-  },
+  keypadKeyText: { fontSize: 18, fontWeight: "600", color: "#111827" },
   doneButton: {
     marginTop: 16,
     paddingVertical: 10,
     paddingHorizontal: 24,
     alignItems: "center",
   },
-  doneButtonText: {
-    fontSize: 18,
-    fontWeight: "600",
-    color: "#000",
-  },
-
+  doneButtonText: { fontSize: 18, fontWeight: "600", color: "#000" },
 });

@@ -1,6 +1,7 @@
 // App.tsx
 import "react-native-gesture-handler";
 import React, { useEffect, useState } from "react";
+import { AppState } from "react-native";
 
 // ✅ SQLite init
 import { initDatabase } from "./src/database/db";
@@ -21,7 +22,7 @@ import ProductsScreen from "./src/screens/ProductsScreen";
 import ModifiersScreen from "./src/screens/ModifiersScreen";
 import OrdersScreen from "./src/screens/OrdersScreen";
 import DevicesScreen from "./src/screens/DevicesScreen";
-import DeviceInfoScreen from "./src/screens/DeviceInfoScreen"; // ✅ NEW
+import DeviceInfoScreen from "./src/screens/DeviceInfoScreen";
 
 // PROVIDERS
 import { CallcenterOrdersProvider } from "./src/context/CallcenterOrdersContext";
@@ -116,23 +117,48 @@ export default function App() {
   const [cart, setCart] = useState<any[]>([]);
   const [activeOrderId, setActiveOrderId] = useState<string | null>(null);
 
-  // ✅ GLOBAL till state
+  // ✅ GLOBAL till state (single source of truth for all screens)
   const [tillOpen, setTillOpen] = useState(false);
-
-  // Load initial value from storage on app start
-  useEffect(() => {
-    (async () => {
-      try {
-        const flag = await AsyncStorage.getItem("pos_till_opened");
-        setTillOpen(flag === "1");
-      } catch (e) {
-        console.log("load till state error", e);
-      }
-    })();
-  }, []);
 
   // Online / Offline
   const [online, setOnline] = useState(true);
+
+  // =======================================================
+  //      Helper: refresh till flag from storage
+  // =======================================================
+  async function refreshTillFlag() {
+    try {
+      const flag = await AsyncStorage.getItem("pos_till_opened");
+      const next = flag === "1";
+      setTillOpen(next);
+    } catch (e) {
+      console.log("refreshTillFlag error", e);
+    }
+  }
+
+  // Load initial value from storage on app start
+  useEffect(() => {
+    refreshTillFlag();
+  }, []);
+
+  // ✅ Keep till flag synced globally (NO React Navigation needed)
+  useEffect(() => {
+    // 1) when app comes foreground, refresh
+    const sub = AppState.addEventListener("change", (state) => {
+      if (state === "active") {
+        refreshTillFlag();
+      }
+    });
+
+    // 2) small interval safety-net (handles till opened/closed in other screens)
+    const timer = setInterval(refreshTillFlag, 1500);
+
+    return () => {
+      sub.remove();
+      clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // =======================================================
   //      INITIALIZE APP (SQLite + Activation + WS + Sync)
@@ -165,9 +191,12 @@ export default function App() {
       } catch (e) {
         console.log("initOrdersEvents error", e);
       }
+
+      // 4) Ensure till flag is correct after init
+      refreshTillFlag();
     })();
 
-    // 4) Internet status watcher + clock/till sync
+    // 5) Internet status watcher + clock/till sync
     const unsub = NetInfo.addEventListener((state) => {
       const isOnline = !!state.isConnected && !!state.isInternetReachable;
       setOnline(isOnline);
@@ -184,6 +213,7 @@ export default function App() {
       unsub();
       // global WS stays alive for app lifecycle; no explicit cleanup
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // ⛔️ IMPORTANT: all hooks are above this line
@@ -200,7 +230,6 @@ export default function App() {
       if (name === "Modifiers") setModifierParams(params || {});
       if (name === "Orders") setOrdersParams(params);
       if (name === "DeviceInfo") setDeviceInfoParams(params);
-      // Devices currently has no params → nothing else to store
       setScreen(name);
     },
 
@@ -252,12 +281,10 @@ export default function App() {
         return;
       }
       if (screen === "Devices") {
-        // from Devices back to Products
         setScreen("Products");
         return;
       }
       if (screen === "DeviceInfo") {
-        // from Printer Info back to Devices
         setScreen("Devices");
         return;
       }
@@ -265,7 +292,6 @@ export default function App() {
   };
 
   //   APP UI — SAME FEATURES, WRAPPED IN PROVIDER
-
   return (
     <CallcenterOrdersProvider>
       {screen === "Activate" && <ActivateScreen navigation={navigation} />}

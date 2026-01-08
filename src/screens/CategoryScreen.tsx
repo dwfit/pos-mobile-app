@@ -16,27 +16,27 @@ import {
 import { get, post } from "../lib/api";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { MaterialIcons } from "@expo/vector-icons";
-
-// 🔊 sound for new orders
+//sound for new orders
 import { Audio } from "expo-av";
-
-// 🔌 WebSocket client
+//WebSocket client
 import { io, Socket } from "socket.io-client";
-
-// 🔹 SQLite helpers
+//SQLite helpers
 import { getLocalCategories } from "../database/menu";
 import {
   saveOrdersToSQLite as saveOrdersLocal,
   LocalOrder,
 } from "../database/ordersLocal";
-
 import { syncMenu } from "../sync/menuSync";
-
-// ✅ Tier Pricing
+//Tier Pricing
 import { getTierPricingForIds } from "../services/tierPricing";
 import { loadPriceTiersWithSync } from "../sync/priceTierSync";
 import { usePriceTierStore, type PriceTier } from "../store/priceTierStore";
 import { useOrderTypeStore } from "../store/orderTypeStore";
+//Tier TIll Close
+import { closeLocalTill, getLocalTillSession, } from "../database/clockLocal";
+import { generateTillCloseReport } from "../reports/tillCloseReport";
+import { printTillCloseReport, type TillCloseReport, } from "../printing/printerService";
+
 
 type Category = {
   id: string;
@@ -473,6 +473,9 @@ export default function CategoryScreen({
   activeOrderId,
   setActiveOrderId,
 }: any) {
+
+
+
   const { branchName, userName } = route?.params || {};
   const [categories, setCategories] = useState<Category[]>([]);
   const [filtered, setFiltered] = useState<Category[]>([]);
@@ -491,20 +494,17 @@ export default function CategoryScreen({
   const [syncing, setSyncing] = useState(false);
   const [payments, setPayments] = useState<PaymentEntry[]>([]);
   const [paymentModalVisible, setPaymentModalVisible] = useState(false);
-  const [selectedPaymentMethodId, setSelectedPaymentMethodId] =
-    useState<string | null>(null);
+  const [selectedPaymentMethodId, setSelectedPaymentMethodId] = useState<string | null>(null);
   const [paying, setPaying] = useState(false);
   const [discountValue, setDiscountValue] = useState<string>("0");
-  const [appliedDiscount, setAppliedDiscount] =
-    useState<AppliedDiscount | null>(null);
+  const [appliedDiscount, setAppliedDiscount] = useState<AppliedDiscount | null>(null);
   const [showCustomAmount, setShowCustomAmount] = useState(false);
   const [customAmountInput, setCustomAmountInput] = useState("");
   const [customerModalVisible, setCustomerModalVisible] = useState(false);
   const [customerSearch, setCustomerSearch] = useState("");
   const [customerList, setCustomerList] = useState<CustomerSummary[]>([]);
   const [customerLoading, setCustomerLoading] = useState(false);
-  const [selectedCustomer, setSelectedCustomer] =
-    useState<CustomerSummary | null>(null);
+  const [selectedCustomer, setSelectedCustomer] = useState<CustomerSummary | null>(null);
   const [newCustomerName, setNewCustomerName] = useState("");
   const [newCustomerPhone, setNewCustomerPhone] = useState("");
   const [savingCustomer, setSavingCustomer] = useState(false);
@@ -531,8 +531,22 @@ export default function CategoryScreen({
   const canUseAnyDiscount = canUseOpenDiscount || canUsePredefinedDiscount;
   //for Home sub-menu
   const [homeMenuVisible, setHomeMenuVisible] = useState(false);
+  // ===== close-till flow =====
+  const [confirmCloseVisible, setConfirmCloseVisible] = useState(false);
+  const [closeAmountVisible, setCloseAmountVisible] = useState(false);
+  const [printPromptVisible, setPrintPromptVisible] = useState(false);
+  const [tillCloseAmount, setTillCloseAmount] = useState("");
+  const [lastReport, setLastReport] = useState<TillCloseReport | null>(null);
+
   const MENU_ITEMS = [
-    { label: "Close Till", icon: "lock-open" },
+    {
+      label: tillOpen ? "Till Close" : "Open Till",
+      icon: tillOpen ? "lock-open" : "lock",
+      onPress: () => {
+        setHomeMenuVisible(false);
+        navigation.navigate("ClockIn", { branchName, userName });
+      },
+    },
     { label: "Drawer Operations", icon: "inbox" },
     { label: "House Account Payment", icon: "account-balance-wallet" },
     { label: "E-Invoice (ZATCA)", icon: "receipt" },
@@ -1338,8 +1352,8 @@ export default function CategoryScreen({
   async function handleOpenOrCloseTill() {
     try {
       if (!tillOpen) {
-        // OPEN TILL
-        const res: any = await post("/pos/till/open", { openingCash: 0 }); // or show a modal to enter amount
+        // OPEN TILL (keep your current logic)
+        const res: any = await post("/pos/till/open", { openingCash: 0 });
 
         await AsyncStorage.multiSet([
           ["pos_till_opened", "1"],
@@ -1348,29 +1362,20 @@ export default function CategoryScreen({
 
         setTillOpen(true);
         Alert.alert("Till opened", "Till opened successfully.");
-      } else {
-        // CLOSE TILL
-        const tillId = await AsyncStorage.getItem("pos_till_session_id");
-        const res: any = await post("/pos/till/close", {
-          tillSessionId: tillId || undefined,
-          closingCash: 0, // later you can ask the cashier
-        });
-
-        await AsyncStorage.multiSet([
-          ["pos_till_opened", "0"],
-          ["pos_till_session_id", ""],
-        ]);
-
-        setTillOpen(false);
-        Alert.alert("Till closed", "Till closed successfully.");
+        setHomeMenuVisible(false);
+        return;
       }
+
+      //  CLOSE TILL -> open popup flow
+      setHomeMenuVisible(false);
+      setConfirmCloseVisible(true);
     } catch (e: any) {
       console.log("handleOpenOrCloseTill error", e);
       Alert.alert("Error", e?.message || "Till operation failed.");
-    } finally {
       setHomeMenuVisible(false);
     }
   }
+
 
   /* ------------------------ CUSTOMER HELPERS ------------------------ */
 
@@ -1962,8 +1967,95 @@ export default function CategoryScreen({
   const payDisabled =
     paying || cartTotal <= 0 || remaining > 0.01 || payments.length === 0;
 
-  /* ------------------------ RENDER ------------------------ */
 
+  //Close Till
+
+  function handleKeypadPress(key: string) {
+    if (key === "C") {
+      setTillCloseAmount("");
+      return;
+    }
+    setTillCloseAmount((prev) => (prev || "") + key);
+  }
+
+  async function actuallyCloseTill(closingCash: number) {
+    try {
+      const localTillId = await AsyncStorage.getItem("pos_till_session_id");
+      if (!localTillId) throw new Error("Missing till session id");
+
+      // 1) save local till close
+      await closeLocalTill(localTillId, closingCash);
+
+      // 2) load session for report
+      const session = await getLocalTillSession(localTillId);
+
+      // 3) build report
+      const openedAt = String(session.openedAt);
+      const closedAt = String(session.closedAt || new Date().toISOString());
+
+      const report = await generateTillCloseReport({
+        tillSessionId: localTillId,
+        branchId,
+        brandId,
+        deviceId,
+        branchName,
+        userName,
+        openingCash: Number(session.openingCash || 0),
+        closingCash: Number(session.closingCash || closingCash),
+        openedAt,
+        closedAt,
+      });
+
+      setLastReport(report);
+
+      // 4) clear flags
+      await AsyncStorage.multiSet([
+        ["pos_till_opened", "0"],
+        ["pos_till_session_id", ""],
+      ]);
+
+      setTillOpen(false);
+      setTillCloseAmount("");
+
+      // 5) sync online (if your "online" prop is true)
+      if (online) {
+        try {
+          await post("/pos/till/close", {
+            branchId,
+            brandId,
+            deviceId,
+            clientId: localTillId,
+            closingCash,
+            report,
+          });
+        } catch (e) {
+          console.log("❌ till close sync failed", e);
+        }
+      }
+
+      // 6) print prompt
+      setPrintPromptVisible(true);
+    } catch (e: any) {
+      Alert.alert("Till close failed", e?.message || "Try again.");
+    }
+  }
+
+  async function handlePrintTillReport(shouldPrint: boolean) {
+    setPrintPromptVisible(false);
+    if (!shouldPrint) return;
+
+    try {
+      if (!lastReport) {
+        Alert.alert("No report", "Till report was not generated.");
+        return;
+      }
+      await printTillCloseReport(lastReport);
+      Alert.alert("Printed", "Till report sent to printer.");
+    } catch (e: any) {
+      Alert.alert("Print failed", e?.message || "Try again");
+    }
+  }
+  /* ------------------------ RENDER ------------------------ */
   return (
     <SafeAreaView style={styles.root}>
       {/* Top bar */}
@@ -3078,7 +3170,7 @@ export default function CategoryScreen({
               style={styles.homeMenuItem}
               onPress={() => {
                 setHomeMenuVisible(false);
-                navigation.navigate("Home");
+                navigation.navigate("ClockIn");
               }}
             >
               <MaterialIcons
@@ -3097,6 +3189,124 @@ export default function CategoryScreen({
 
         </View>
       </Modal>
+      {/* 1) Confirm Close Till */}
+      <Modal
+        visible={confirmCloseVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setConfirmCloseVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.tillModalCard}>
+            <Text style={styles.tillModalTitle}>Close Till</Text>
+            <Text style={styles.tillModalMsg}>Are you sure you want to close till?</Text>
+
+            <View style={styles.tillModalRow}>
+              <Pressable
+                style={[styles.tillBtn, styles.tillBtnSecondary]}
+                onPress={() => setConfirmCloseVisible(false)}
+              >
+                <Text style={styles.tillBtnTextSecondary}>No</Text>
+              </Pressable>
+
+              <Pressable
+                style={[styles.tillBtn, styles.tillBtnPrimary]}
+                onPress={() => {
+                  setConfirmCloseVisible(false);
+                  setTillCloseAmount("");
+                  setCloseAmountVisible(true);
+                }}
+              >
+                <Text style={styles.tillBtnTextPrimary}>Yes</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* 2) Enter Till Amount */}
+      <Modal
+        visible={closeAmountVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setCloseAmountVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.tillAmountCard}>
+            <Text style={styles.tillModalTitle}>Enter Till Amount</Text>
+
+            <View style={styles.tillAmountDisplay}>
+              <Text style={styles.tillAmountText}>{tillCloseAmount || "0.00"}</Text>
+            </View>
+
+            {[
+              ["1", "2", "3"],
+              ["4", "5", "6"],
+              ["7", "8", "9"],
+              ["C", "0"],
+            ].map((row, idx) => (
+              <View key={idx} style={styles.tillKeypadRow}>
+                {row.map((k) => (
+                  <Pressable
+                    key={k}
+                    style={styles.tillKeypadKey}
+                    onPress={() => handleKeypadPress(k)}
+                  >
+                    <Text style={styles.tillKeypadKeyText}>{k}</Text>
+                  </Pressable>
+                ))}
+              </View>
+            ))}
+
+            <Pressable
+              style={styles.tillDoneBtn}
+              onPress={() => {
+                if (!tillCloseAmount) return Alert.alert("Enter till amount");
+                const val = Number(tillCloseAmount);
+                if (Number.isNaN(val)) return Alert.alert("Invalid amount");
+                setCloseAmountVisible(false);
+                actuallyCloseTill(val);
+              }}
+            >
+              <Text style={styles.tillDoneText}>Done</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+
+      {/* 3) Print prompt */}
+      <Modal
+        visible={printPromptVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setPrintPromptVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.tillModalCard}>
+            <Text style={styles.tillModalTitle}>Till Closed Successfully!</Text>
+            <Text style={styles.tillModalMsg}>
+              Would you like to print the till report?
+            </Text>
+
+            <View style={styles.tillModalRow}>
+              <Pressable
+                style={[styles.tillBtn, styles.tillBtnPrimary]}
+                onPress={() => handlePrintTillReport(true)}
+              >
+                <Text style={styles.tillBtnTextPrimary}>Yes</Text>
+              </Pressable>
+
+              <Pressable
+                style={[styles.tillBtn, styles.tillBtnSecondary]}
+                onPress={() => handlePrintTillReport(false)}
+              >
+                <Text style={styles.tillBtnTextSecondary}>No</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
     </SafeAreaView>
   );
 }
@@ -3621,6 +3831,52 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: "#111827",
   },
+  tillModalCard: {
+    width: 360,
+    backgroundColor: "#fff",
+    borderRadius: 16,
+    padding: 20,
+    alignItems: "center",
+  },
+  tillModalTitle: { fontSize: 18, fontWeight: "700", marginBottom: 8, color: "#111827" },
+  tillModalMsg: { fontSize: 14, color: "#4b5563", textAlign: "center", marginBottom: 16 },
+
+  tillModalRow: { flexDirection: "row", width: "100%" },
+  tillBtn: { flex: 1, paddingVertical: 10, borderRadius: 10, alignItems: "center", marginHorizontal: 6 },
+  tillBtnPrimary: { backgroundColor: "#000" },
+  tillBtnSecondary: { backgroundColor: "#e5e7eb" },
+  tillBtnTextPrimary: { color: "#fff", fontWeight: "700" },
+  tillBtnTextSecondary: { color: "#111827", fontWeight: "700" },
+
+  tillAmountCard: {
+    width: 360,
+    backgroundColor: "#fff",
+    borderRadius: 16,
+    padding: 20,
+    alignItems: "center",
+  },
+  tillAmountDisplay: {
+    width: "100%",
+    paddingVertical: 12,
+    borderRadius: 10,
+    backgroundColor: "#f3f4f6",
+    alignItems: "center",
+    marginBottom: 12,
+  },
+  tillAmountText: { fontSize: 22, fontWeight: "800", color: "#111827" },
+  tillKeypadRow: { flexDirection: "row", width: "100%", marginBottom: 8 },
+  tillKeypadKey: {
+    flex: 1,
+    marginHorizontal: 6,
+    paddingVertical: 12,
+    borderRadius: 10,
+    backgroundColor: "#e5e7eb",
+    alignItems: "center",
+  },
+  tillKeypadKeyText: { fontSize: 18, fontWeight: "800", color: "#111827" },
+  tillDoneBtn: { marginTop: 10, paddingVertical: 10, paddingHorizontal: 18 },
+  tillDoneText: { fontSize: 18, fontWeight: "800", color: "#000" },
+
 
 
 });

@@ -1,5 +1,6 @@
 // src/database/clockLocal.ts
 import { execSql, queryAll } from "./db";
+import { getDb } from "./db";
 
 /**
  * Simple local ID generator that does NOT use crypto or uuid.
@@ -160,6 +161,25 @@ export async function closeLocalTill(
     [now, closingCash ?? null, localTillId]
   );
 }
+
+/**
+ * ✅ NEW: Load a till session (needed for report generation)
+ */
+export async function getLocalTillSession(
+  localTillId: string
+): Promise<LocalTillRow> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<any>(
+    `SELECT * FROM local_till_sessions WHERE id = ? LIMIT 1;`,
+    [localTillId]
+  );
+
+  if (!row) throw new Error("Till session not found");
+  return row as LocalTillRow;
+}
+
+// alias if you like
+export const getTillSessionById = getLocalTillSession;
 
 /* -------- OPTIONAL: helpers for sync layer -------- */
 

@@ -1,5 +1,5 @@
 // src/screens/DeviceInfoScreen.tsx
-import React, { useState, useEffect } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   SafeAreaView,
   View,
@@ -12,7 +12,7 @@ import {
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { MaterialIcons } from "@expo/vector-icons";
 
-// 🔹 menu + db helpers (already used elsewhere in your app)
+// ✅ correct paths
 import { getLocalCategories } from "../database/menu";
 import { getDb } from "../database/db";
 
@@ -46,7 +46,7 @@ const ORDER_TYPE_OPTIONS = [
 
 type DeviceInfoRouteParams = {
   mode: "create" | "edit";
-  deviceType: string; // "Printer" etc.
+  deviceType: string; // "Printer"
   deviceId?: string;
 };
 
@@ -65,28 +65,18 @@ type SubScreen =
 
 type StoredDevice = {
   id: string;
-  kind: string; // "Printer"
+  kind: string;
   model: string | null;
   typeLabel: string | null;
   name: string;
   ip: string;
-  enabledOrderTypes: string[]; // codes
-
-  // filters stored as CSV of IDs
-  categoryFilter?: string | null; // category ids
-  productFilter?: string | null; // product ids
+  enabledOrderTypes: string[];
+  categoryFilter?: string | null;
+  productFilter?: string | null;
 };
 
-type LocalCategory = {
-  id: string;
-  name: string;
-};
-
-type LocalProduct = {
-  id: string;
-  name: string;
-  categoryId: string | null;
-};
+type LocalCategory = { id: string; name: string };
+type LocalProduct = { id: string; name: string; categoryId: string | null };
 
 export default function DeviceInfoScreen({ navigation, route }: Props) {
   const { mode, deviceType, deviceId } = route.params || {
@@ -103,91 +93,65 @@ export default function DeviceInfoScreen({ navigation, route }: Props) {
 
   const [enabledOrderTypes, setEnabledOrderTypes] = useState<string[]>([]);
 
-  // 🔹 full menu data
   const [allCategories, setAllCategories] = useState<LocalCategory[]>([]);
   const [allProducts, setAllProducts] = useState<LocalProduct[]>([]);
 
-  // 🔹 selected filters (IDs)
   const [selectedCategoryIds, setSelectedCategoryIds] = useState<string[]>([]);
   const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
 
-  // ===== Load menu data (categories + products) =======================
+  // Load menu from local DB
   useEffect(() => {
-    async function loadMenuData() {
+    (async () => {
       try {
-        // categories from local menu helper
         const cats = await getLocalCategories();
-        setAllCategories(
-          (cats || []).map((c: any) => ({
-            id: String(c.id),
-            name: String(c.name),
-          }))
-        );
+        setAllCategories(cats || []);
 
-        // products directly from SQLite
-        const db = await getDb();
-        const rows = (await db.getAllAsync(
-          "SELECT id, name, categoryId FROM products WHERE isActive = 1 ORDER BY name"
-        )) as any[];
-
-        setAllProducts(
-          (rows || []).map((p: any) => ({
-            id: String(p.id),
-            name: String(p.name),
-            categoryId: p.categoryId ? String(p.categoryId) : null,
-          }))
+        // minimal products load
+        const db = getDb();
+        const rows = await db.getAllAsync<any>(
+          `SELECT id, name, categoryId FROM products`
         );
+        const prods: LocalProduct[] = (rows || []).map((r: any) => ({
+          id: String(r.id),
+          name: String(r.name || ""),
+          categoryId: r.categoryId ? String(r.categoryId) : null,
+        }));
+        setAllProducts(prods);
       } catch (e) {
-        console.log("loadMenuData error", e);
+        console.log("Load local menu failed", e);
       }
-    }
-
-    loadMenuData();
+    })();
   }, []);
 
-  // ===== Load existing device when editing ==========================
+  // Load device for edit
   useEffect(() => {
-    async function loadForEdit() {
+    (async () => {
       if (mode !== "edit" || !deviceId) return;
 
       try {
         const raw = await AsyncStorage.getItem(STORAGE_KEY);
         const list: StoredDevice[] = raw ? JSON.parse(raw) : [];
-        const found = list.find((d) => d.id === deviceId);
+        const found = (Array.isArray(list) ? list : []).find((d) => d.id === deviceId);
         if (!found) return;
 
-        setModel(found.model || null);
-        setTypeLabel(found.typeLabel || null);
-        setName(found.name || "");
-        setIp(found.ip || "");
-        setEnabledOrderTypes(found.enabledOrderTypes || []);
+        setModel(found.model ?? null);
+        setTypeLabel(found.typeLabel ?? null);
+        setName(found.name ?? "");
+        setIp(found.ip ?? "");
+        setEnabledOrderTypes(Array.isArray(found.enabledOrderTypes) ? found.enabledOrderTypes : []);
 
-        // parse CSV -> arrays
-        if (found.categoryFilter) {
-          setSelectedCategoryIds(
-            found.categoryFilter
-              .split(",")
-              .map((s) => s.trim())
-              .filter(Boolean)
-          );
-        }
-        if (found.productFilter) {
-          setSelectedProductIds(
-            found.productFilter
-              .split(",")
-              .map((s) => s.trim())
-              .filter(Boolean)
-          );
-        }
+        const catIds =
+          found.categoryFilter?.split(",").filter(Boolean) ?? [];
+        const prodIds =
+          found.productFilter?.split(",").filter(Boolean) ?? [];
+
+        setSelectedCategoryIds(catIds);
+        setSelectedProductIds(prodIds);
       } catch (e) {
-        console.log("loadForEdit error", e);
+        console.log("Load device error", e);
       }
-    }
-
-    loadForEdit();
+    })();
   }, [mode, deviceId]);
-
-  // ===== Helpers ====================================================
 
   function toggleOrderType(code: string) {
     setEnabledOrderTypes((prev) =>
@@ -208,29 +172,27 @@ export default function DeviceInfoScreen({ navigation, route }: Props) {
   }
 
   function getEnabledTypesLabel() {
-    if (!enabledOrderTypes || enabledOrderTypes.length === 0) return "Not set";
-
-    const labels = ORDER_TYPE_OPTIONS
+    if (!enabledOrderTypes?.length) return "Not set";
+    return ORDER_TYPE_OPTIONS
       .filter((o) => enabledOrderTypes.includes(o.code))
-      .map((o) => o.label);
-
-    return labels.join(", ");
+      .map((o) => o.label)
+      .join(", ");
   }
 
   function getCategoryFilterLabel() {
     if (!selectedCategoryIds.length) return "All categories";
-    const names = allCategories
+    return allCategories
       .filter((c) => selectedCategoryIds.includes(c.id))
-      .map((c) => c.name);
-    return names.join(", ");
+      .map((c) => c.name)
+      .join(", ");
   }
 
   function getProductFilterLabel() {
     if (!selectedProductIds.length) return "All products";
-    const names = allProducts
+    return allProducts
       .filter((p) => selectedProductIds.includes(p.id))
-      .map((p) => p.name);
-    return names.join(", ");
+      .map((p) => p.name)
+      .join(", ");
   }
 
   const headerTitle =
@@ -249,14 +211,9 @@ export default function DeviceInfoScreen({ navigation, route }: Props) {
   const showSave = subScreen === "MAIN";
 
   function handleBack() {
-    if (subScreen === "MAIN") {
-      navigation.goBack(); // App.tsx: DeviceInfo -> Devices
-    } else {
-      setSubScreen("MAIN");
-    }
+    if (subScreen === "MAIN") navigation.goBack();
+    else setSubScreen("MAIN");
   }
-
-  // ===== SAVE to AsyncStorage ======================================
 
   async function saveDevice() {
     try {
@@ -282,7 +239,9 @@ export default function DeviceInfoScreen({ navigation, route }: Props) {
           categoryFilter,
           productFilter,
         };
-        nextList = list.map((d) => (d.id === deviceId ? updated : d));
+        nextList = (Array.isArray(list) ? list : []).map((d) =>
+          d.id === deviceId ? updated : d
+        );
       } else {
         const id = deviceId || Date.now().toString();
         const item: StoredDevice = {
@@ -296,12 +255,10 @@ export default function DeviceInfoScreen({ navigation, route }: Props) {
           categoryFilter,
           productFilter,
         };
-        nextList = [...list, item];
+        nextList = [...(Array.isArray(list) ? list : []), item];
       }
 
       await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(nextList));
-
-      // back to Devices
       navigation.goBack();
     } catch (e) {
       console.log("saveDevice error", e);
@@ -309,7 +266,13 @@ export default function DeviceInfoScreen({ navigation, route }: Props) {
     }
   }
 
-  // ===== RENDER =====================================================
+  const filteredProducts = useMemo(() => {
+    // optional: filter by selected categories to reduce list
+    if (!selectedCategoryIds.length) return allProducts;
+    return allProducts.filter((p) =>
+      p.categoryId ? selectedCategoryIds.includes(p.categoryId) : false
+    );
+  }, [allProducts, selectedCategoryIds]);
 
   return (
     <SafeAreaView style={styles.overlay}>
@@ -331,63 +294,33 @@ export default function DeviceInfoScreen({ navigation, route }: Props) {
           </View>
         </View>
 
-        {/* MAIN SCREEN ------------------------------------------------ */}
+        {/* MAIN */}
         {subScreen === "MAIN" && (
           <View style={styles.list}>
-            {/* Model row */}
-            <Pressable
-              style={styles.row}
-              onPress={() => setSubScreen("MODEL")}
-            >
+            <Pressable style={styles.row} onPress={() => setSubScreen("MODEL")}>
               <Text style={styles.rowLabel}>Model</Text>
               <View style={styles.rowRight}>
-                <Text
-                  style={[
-                    styles.rowValue,
-                    !model && styles.placeholderText,
-                  ]}
-                >
+                <Text style={[styles.rowValue, !model && styles.placeholderText]}>
                   {model || "Select model"}
                 </Text>
-                <MaterialIcons
-                  name="chevron-right"
-                  size={20}
-                  color="#9ca3af"
-                />
+                <MaterialIcons name="chevron-right" size={20} color="#9ca3af" />
               </View>
             </Pressable>
 
-            {/* Type row */}
-            <Pressable
-              style={styles.row}
-              onPress={() => setSubScreen("TYPE")}
-            >
+            <Pressable style={styles.row} onPress={() => setSubScreen("TYPE")}>
               <Text style={styles.rowLabel}>Type</Text>
               <View style={styles.rowRight}>
-                <Text
-                  style={[
-                    styles.rowValue,
-                    !typeLabel && styles.placeholderText,
-                  ]}
-                >
+                <Text style={[styles.rowValue, !typeLabel && styles.placeholderText]}>
                   {typeLabel || "Select type"}
                 </Text>
-                <MaterialIcons
-                  name="chevron-right"
-                  size={20}
-                  color="#9ca3af"
-                />
+                <MaterialIcons name="chevron-right" size={20} color="#9ca3af" />
               </View>
             </Pressable>
 
-            {/* NAME row */}
             <View style={styles.row}>
               <Text style={styles.rowLabel}>Name</Text>
               <TextInput
-                style={[
-                  styles.textInput,
-                  !name && styles.placeholderText,
-                ]}
+                style={styles.textInput}
                 value={name}
                 onChangeText={setName}
                 placeholder="Printer name"
@@ -395,100 +328,60 @@ export default function DeviceInfoScreen({ navigation, route }: Props) {
               />
             </View>
 
-            {/* IP row */}
             <View style={styles.row}>
               <Text style={styles.rowLabel}>IP address</Text>
               <TextInput
-                style={[
-                  styles.textInput,
-                  !ip && styles.placeholderText,
-                ]}
+                style={styles.textInput}
                 value={ip}
                 onChangeText={setIp}
                 keyboardType="numeric"
-                placeholder="0.0.0.0"
+                placeholder="192.168.0.10"
                 placeholderTextColor="#9ca3af"
               />
             </View>
 
-            {/* Category filter row */}
             <Pressable
               style={styles.row}
               onPress={() => setSubScreen("CATEGORY_FILTER")}
             >
               <Text style={styles.rowLabel}>Category filter</Text>
               <View style={styles.rowRight}>
-                <Text
-                  style={[
-                    styles.rowValue,
-                    !selectedCategoryIds.length &&
-                      styles.placeholderText,
-                  ]}
-                  numberOfLines={1}
-                >
+                <Text style={styles.rowValue} numberOfLines={1}>
                   {getCategoryFilterLabel()}
                 </Text>
-                <MaterialIcons
-                  name="chevron-right"
-                  size={20}
-                  color="#9ca3af"
-                />
+                <MaterialIcons name="chevron-right" size={20} color="#9ca3af" />
               </View>
             </Pressable>
 
-            {/* Product filter row */}
             <Pressable
               style={styles.row}
               onPress={() => setSubScreen("PRODUCT_FILTER")}
             >
               <Text style={styles.rowLabel}>Product filter</Text>
               <View style={styles.rowRight}>
-                <Text
-                  style={[
-                    styles.rowValue,
-                    !selectedProductIds.length &&
-                      styles.placeholderText,
-                  ]}
-                  numberOfLines={1}
-                >
+                <Text style={styles.rowValue} numberOfLines={1}>
                   {getProductFilterLabel()}
                 </Text>
-                <MaterialIcons
-                  name="chevron-right"
-                  size={20}
-                  color="#9ca3af"
-                />
+                <MaterialIcons name="chevron-right" size={20} color="#9ca3af" />
               </View>
             </Pressable>
 
-            {/* Enabled order types */}
             <Pressable
               style={styles.row}
               onPress={() => setSubScreen("ORDER_TYPES")}
             >
               <Text style={styles.rowLabel}>Enabled order types</Text>
               <View style={styles.rowRight}>
-                <Text
-                  style={[
-                    styles.rowValue,
-                    (!enabledOrderTypes ||
-                      !enabledOrderTypes.length) &&
-                      styles.placeholderText,
-                  ]}
-                >
+                <Text style={styles.rowValue} numberOfLines={1}>
                   {getEnabledTypesLabel()}
                 </Text>
-                <MaterialIcons
-                  name="chevron-right"
-                  size={20}
-                  color="#9ca3af"
-                />
+                <MaterialIcons name="chevron-right" size={20} color="#9ca3af" />
               </View>
             </Pressable>
           </View>
         )}
 
-        {/* MODEL LIST ------------------------------------------------- */}
+        {/* MODEL */}
         {subScreen === "MODEL" && (
           <FlatList
             data={PRINTER_MODELS}
@@ -508,7 +401,7 @@ export default function DeviceInfoScreen({ navigation, route }: Props) {
           />
         )}
 
-        {/* TYPE LIST -------------------------------------------------- */}
+        {/* TYPE */}
         {subScreen === "TYPE" && (
           <FlatList
             data={PRINTER_TYPES}
@@ -520,6 +413,7 @@ export default function DeviceInfoScreen({ navigation, route }: Props) {
                 onPress={() => {
                   setTypeLabel(item);
                   setSubScreen("MAIN");
+;
                 }}
               >
                 <Text style={styles.rowLabel}>{item}</Text>
@@ -528,116 +422,70 @@ export default function DeviceInfoScreen({ navigation, route }: Props) {
           />
         )}
 
-        {/* ORDER TYPES ------------------------------------------------ */}
+        {/* ORDER TYPES */}
         {subScreen === "ORDER_TYPES" && (
-          <View style={{ flex: 1 }}>
-            <View style={styles.sectionHeaderRow}>
-              <Text style={styles.sectionHeader}>ENABLED ORDER TYPES</Text>
-            </View>
-            <FlatList
-              data={ORDER_TYPE_OPTIONS}
-              keyExtractor={(m) => m.code}
-              ItemSeparatorComponent={() => <View style={styles.separator} />}
-              renderItem={({ item }) => {
-                const active = enabledOrderTypes.includes(item.code);
-                return (
-                  <Pressable
-                    style={styles.row}
-                    onPress={() => toggleOrderType(item.code)}
-                  >
-                    <Text style={styles.rowLabel}>{item.label}</Text>
-                    {active && (
-                      <MaterialIcons
-                        name="check"
-                        size={20}
-                        color="#10b981"
-                      />
-                    )}
-                  </Pressable>
-                );
-              }}
-            />
-          </View>
+          <FlatList
+            data={ORDER_TYPE_OPTIONS}
+            keyExtractor={(m) => m.code}
+            ItemSeparatorComponent={() => <View style={styles.separator} />}
+            renderItem={({ item }) => {
+              const active = enabledOrderTypes.includes(item.code);
+              return (
+                <Pressable style={styles.row} onPress={() => toggleOrderType(item.code)}>
+                  <Text style={styles.rowLabel}>{item.label}</Text>
+                  <MaterialIcons
+                    name={active ? "check-circle" : "radio-button-unchecked"}
+                    size={20}
+                    color={active ? "#111827" : "#9ca3af"}
+                  />
+                </Pressable>
+              );
+            }}
+          />
         )}
 
-        {/* CATEGORY FILTER -------------------------------------------- */}
+        {/* CATEGORY FILTER */}
         {subScreen === "CATEGORY_FILTER" && (
-          <View style={{ flex: 1 }}>
-            <View style={styles.sectionHeaderRow}>
-              <Text style={styles.sectionHeader}>
-                SELECT CATEGORIES FOR THIS PRINTER
-              </Text>
-            </View>
-            <FlatList
-              data={allCategories}
-              keyExtractor={(c) => c.id}
-              ItemSeparatorComponent={() => <View style={styles.separator} />}
-              renderItem={({ item }) => {
-                const active = selectedCategoryIds.includes(item.id);
-                return (
-                  <Pressable
-                    style={styles.row}
-                    onPress={() => toggleCategory(item.id)}
-                  >
-                    <Text style={styles.rowLabel}>{item.name}</Text>
-                    {active && (
-                      <MaterialIcons
-                        name="check"
-                        size={20}
-                        color="#10b981"
-                      />
-                    )}
-                  </Pressable>
-                );
-              }}
-            />
-          </View>
+          <FlatList
+            data={allCategories}
+            keyExtractor={(c) => c.id}
+            ItemSeparatorComponent={() => <View style={styles.separator} />}
+            renderItem={({ item }) => {
+              const active = selectedCategoryIds.includes(item.id);
+              return (
+                <Pressable style={styles.row} onPress={() => toggleCategory(item.id)}>
+                  <Text style={styles.rowLabel}>{item.name}</Text>
+                  <MaterialIcons
+                    name={active ? "check-circle" : "radio-button-unchecked"}
+                    size={20}
+                    color={active ? "#111827" : "#9ca3af"}
+                  />
+                </Pressable>
+              );
+            }}
+          />
         )}
 
-        {/* PRODUCT FILTER --------------------------------------------- */}
+        {/* PRODUCT FILTER */}
         {subScreen === "PRODUCT_FILTER" && (
-          <View style={{ flex: 1 }}>
-            <View style={styles.sectionHeaderRow}>
-              <Text style={styles.sectionHeader}>
-                SELECT PRODUCTS FOR THIS PRINTER
-              </Text>
-            </View>
-            <FlatList
-              data={allProducts}
-              keyExtractor={(p) => p.id}
-              ItemSeparatorComponent={() => <View style={styles.separator} />}
-              renderItem={({ item }) => {
-                const active = selectedProductIds.includes(item.id);
-                const catName =
-                  allCategories.find((c) => c.id === item.categoryId)?.name ||
-                  "";
-                return (
-                  <Pressable
-                    style={styles.row}
-                    onPress={() => toggleProduct(item.id)}
-                  >
-                    <View>
-                      <Text style={styles.rowLabel}>{item.name}</Text>
-                      {!!catName && (
-                        <Text
-                          style={{ fontSize: 12, color: "#9ca3af" }}
-                        >
-                          {catName}
-                        </Text>
-                      )}
-                    </View>
-                    {active && (
-                      <MaterialIcons
-                        name="check"
-                        size={20}
-                        color="#10b981"
-                      />
-                    )}
-                  </Pressable>
-                );
-              }}
-            />
-          </View>
+          <FlatList
+            data={filteredProducts}
+            keyExtractor={(p) => p.id}
+            ItemSeparatorComponent={() => <View style={styles.separator} />}
+            renderItem={({ item }) => {
+              const active = selectedProductIds.includes(item.id);
+              return (
+                <Pressable style={styles.row} onPress={() => toggleProduct(item.id)}>
+                  <Text style={styles.rowLabel}>{item.name}</Text>
+                  <MaterialIcons
+                    name={active ? "check-circle" : "radio-button-unchecked"}
+                    size={20}
+                    color={active ? "#111827" : "#9ca3af"}
+                  />
+                </Pressable>
+              );
+            }}
+          />
         )}
       </View>
     </SafeAreaView>
@@ -645,87 +493,41 @@ export default function DeviceInfoScreen({ navigation, route }: Props) {
 }
 
 const styles = StyleSheet.create({
-  overlay: {
-    flex: 1,
-    backgroundColor: "rgba(0,0,0,0.25)",
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  card: {
-    width: "94%",
-    height: "90%",
-    backgroundColor: "#ffffff",
-    borderRadius: 28,
-    overflow: "hidden",
-    shadowColor: "#000",
-    shadowOpacity: 0.2,
-    shadowOffset: { width: 0, height: 8 },
-    shadowRadius: 18,
-    elevation: 10,
-  },
+  overlay: { flex: 1, backgroundColor: "#f3f4f6" },
+  card: { flex: 1 },
+
   header: {
-    paddingHorizontal: 24,
-    paddingTop: 14,
-    paddingBottom: 10,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-  },
-  headerLink: {
-    color: "#000000",
-    fontSize: 16,
-    fontWeight: "500",
-  },
-  headerTitle: {
-    fontSize: 18,
-    fontWeight: "600",
-    color: "#111827",
-  },
-  list: {
-    flex: 1,
-  },
-  row: {
-    paddingHorizontal: 24,
+    paddingHorizontal: 16,
     paddingVertical: 12,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
+    backgroundColor: "#f3f4f6",
   },
-  rowLabel: {
-    fontSize: 15,
-    color: "#111827",
-  },
-  rowRight: {
+  headerLink: { color: "#111827", fontSize: 16, fontWeight: "600" },
+  headerTitle: { color: "#111827", fontSize: 16, fontWeight: "700" },
+
+  list: { backgroundColor: "#ffffff" },
+  row: {
     flexDirection: "row",
     alignItems: "center",
-    maxWidth: "60%",
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    justifyContent: "space-between",
+    backgroundColor: "#ffffff",
   },
-  rowValue: {
-    fontSize: 14,
-    color: "#111827",
-    marginRight: 4,
-  },
+  rowLabel: { fontSize: 14, fontWeight: "600", color: "#111827" },
+  rowRight: { flexDirection: "row", alignItems: "center", gap: 8, maxWidth: "60%" },
+  rowValue: { fontSize: 13, color: "#6b7280", maxWidth: "90%" },
+  placeholderText: { color: "#9ca3af" },
+
   textInput: {
-    minWidth: 200,
+    flex: 1,
     textAlign: "right",
-    fontSize: 15,
     color: "#111827",
+    paddingVertical: 6,
+    marginLeft: 12,
   },
-  placeholderText: {
-    color: "#9ca3af",
-  },
-  separator: {
-    height: StyleSheet.hairlineWidth,
-    backgroundColor: "#e5e7eb",
-  },
-  sectionHeaderRow: {
-    paddingHorizontal: 24,
-    paddingTop: 10,
-    paddingBottom: 4,
-  },
-  sectionHeader: {
-    fontSize: 12,
-    fontWeight: "600",
-    color: "#6b7280",
-  },
+
+  separator: { height: 1, backgroundColor: "#e5e7eb" },
 });

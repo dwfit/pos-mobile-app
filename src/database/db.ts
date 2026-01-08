@@ -1,5 +1,5 @@
 // src/database/db.ts
-import * as SQLite from 'expo-sqlite';
+import * as SQLite from "expo-sqlite";
 
 // Keep a single DB instance for the whole app (sync open)
 let _db: SQLite.SQLiteDatabase | null = null;
@@ -7,8 +7,8 @@ let _db: SQLite.SQLiteDatabase | null = null;
 /** Get (or open) the SQLite DB instance (new async API, sync open). */
 export function getDb(): SQLite.SQLiteDatabase {
   if (!_db) {
-    _db = SQLite.openDatabaseSync('pos.db');
-    console.log('📦 SQLite DB opened');
+    _db = SQLite.openDatabaseSync("pos.db");
+    console.log("📦 SQLite DB opened");
   }
   return _db;
 }
@@ -24,16 +24,13 @@ export async function queryAll<T = any>(
     const rows = await db.getAllAsync<T>(sql, ...params);
     return rows;
   } catch (err) {
-    console.log('SQLite queryAll error:', err);
+    console.log("SQLite queryAll error:", err);
     throw err;
   }
 }
 
 /** Run a SQL statement that doesn't need rows (CREATE/INSERT/UPDATE/DELETE). */
-export async function execSql(
-  sql: string,
-  params: any[] = [],
-): Promise<void> {
+export async function execSql(sql: string, params: any[] = []): Promise<void> {
   try {
     const db = getDb();
 
@@ -51,7 +48,7 @@ export async function execSql(
       await stmt.finalizeAsync();
     }
   } catch (err) {
-    console.log('SQLite execSql error:', err);
+    console.log("SQLite execSql error:", err);
     throw err;
   }
 }
@@ -61,12 +58,12 @@ export async function runTransaction(
   fn: (db: SQLite.SQLiteDatabase) => Promise<void>,
 ): Promise<void> {
   const db = getDb();
-  await db.execAsync('BEGIN');
+  await db.execAsync("BEGIN");
   try {
     await fn(db);
-    await db.execAsync('COMMIT');
+    await db.execAsync("COMMIT");
   } catch (err) {
-    await db.execAsync('ROLLBACK');
+    await db.execAsync("ROLLBACK");
     throw err;
   }
 }
@@ -76,8 +73,45 @@ export async function initDatabase() {
   try {
     const db = getDb();
 
+    /**
+     * ✅ Safe migration helper
+     * - Checks PRAGMA table_info first
+     * - If column exists → skip
+     * - If ALTER throws "duplicate column" (race/old build) → ignore
+     */
+    async function ensureColumn(
+      table: string,
+      column: string,
+      ddl: string, // e.g. "taxTotal REAL DEFAULT 0"
+    ) {
+      const cols = await db.getAllAsync<{ name: string }>(
+        `PRAGMA table_info(${table});`,
+      );
+      const normalized = cols.map((c) =>
+        String(c?.name || "").trim().toLowerCase(),
+      );
+      const exists = normalized.includes(String(column).trim().toLowerCase());
+
+      if (exists) {
+        console.log(`ℹ️ Column exists: ${table}.${column}`);
+        return;
+      }
+
+      try {
+        await db.execAsync(`ALTER TABLE ${table} ADD COLUMN ${ddl};`);
+        console.log(`✅ Migration: ${table}.${column} added`);
+      } catch (e: any) {
+        const msg = String(e?.message || e);
+        if (msg.toLowerCase().includes("duplicate column name")) {
+          console.log(`ℹ️ Duplicate column ignored: ${table}.${column}`);
+          return;
+        }
+        throw e;
+      }
+    }
+
     // 1) Base schema (for fresh installs) – one statement at a time
-    await execSql('PRAGMA journal_mode = WAL;');
+    await execSql("PRAGMA journal_mode = WAL;");
 
     await execSql(`
       CREATE TABLE IF NOT EXISTS categories (
@@ -173,61 +207,83 @@ export async function initDatabase() {
       );
     `);
 
+    // ✅ payments_local (used by till close report)
+    await execSql(`
+      CREATE TABLE IF NOT EXISTS payments_local (
+        id TEXT PRIMARY KEY,
+        orderId TEXT,
+        tillSessionId TEXT,
+        methodId TEXT,
+        methodName TEXT,
+        amount REAL DEFAULT 0,
+        createdAt TEXT
+      );
+    `);
+
     // 2) Migrations for old installs (check columns first with PRAGMA)
 
     // ---- categories columns ----
     const catCols = await queryAll<{ name: string }>(
-      'PRAGMA table_info(categories);',
+      "PRAGMA table_info(categories);",
     );
-    const catHasImageUrl = catCols.some((c) => c.name === 'imageUrl');
-    const catHasIsActive = catCols.some((c) => c.name === 'isActive');
+    const catHasImageUrl = catCols.some((c) => c.name === "imageUrl");
+    const catHasIsActive = catCols.some((c) => c.name === "isActive");
 
     if (!catHasImageUrl) {
       await execSql(`ALTER TABLE categories ADD COLUMN imageUrl TEXT;`);
-      console.log('✅ Migration: categories.imageUrl added');
+      console.log("✅ Migration: categories.imageUrl added");
     } else {
-      console.log('ℹ️ categories.imageUrl already exists, skipping');
+      console.log("ℹ️ categories.imageUrl already exists, skipping");
     }
 
     if (!catHasIsActive) {
       await execSql(`ALTER TABLE categories ADD COLUMN isActive INTEGER;`);
-      console.log('✅ Migration: categories.isActive added');
+      console.log("✅ Migration: categories.isActive added");
     } else {
-      console.log('ℹ️ categories.isActive already exists, skipping');
+      console.log("ℹ️ categories.isActive already exists, skipping");
     }
 
     // ---- products columns ----
     const prodCols = await queryAll<{ name: string }>(
-      'PRAGMA table_info(products);',
+      "PRAGMA table_info(products);",
     );
-    const prodHasPrice = prodCols.some((c) => c.name === 'price');
-    const prodHasImageUrl = prodCols.some((c) => c.name === 'imageUrl');
-    const prodHasIsActive = prodCols.some((c) => c.name === 'isActive');
+    const prodHasPrice = prodCols.some((c) => c.name === "price");
+    const prodHasImageUrl = prodCols.some((c) => c.name === "imageUrl");
+    const prodHasIsActive = prodCols.some((c) => c.name === "isActive");
 
     if (!prodHasPrice) {
       await execSql(`ALTER TABLE products ADD COLUMN price REAL;`);
-      console.log('✅ Migration: products.price added');
+      console.log("✅ Migration: products.price added");
     } else {
-      console.log('ℹ️ products.price already exists, skipping');
+      console.log("ℹ️ products.price already exists, skipping");
     }
 
     if (!prodHasImageUrl) {
       await execSql(`ALTER TABLE products ADD COLUMN imageUrl TEXT;`);
-      console.log('✅ Migration: products.imageUrl added');
+      console.log("✅ Migration: products.imageUrl added");
     } else {
-      console.log('ℹ️ products.imageUrl already exists, skipping');
+      console.log("ℹ️ products.imageUrl already exists, skipping");
     }
 
     if (!prodHasIsActive) {
       await execSql(`ALTER TABLE products ADD COLUMN isActive INTEGER;`);
-      console.log('✅ Migration: products.isActive added');
+      console.log("✅ Migration: products.isActive added");
     } else {
-      console.log('ℹ️ products.isActive already exists, skipping');
+      console.log("ℹ️ products.isActive already exists, skipping");
     }
 
-    console.log('📦 SQLite tables created / migrated OK');
+    // ✅ orders_local columns needed by till close report
+    // netTotal already exists in CREATE TABLE; don't add it again
+    await ensureColumn("orders_local", "taxTotal", "taxTotal REAL DEFAULT 0");
+    await ensureColumn(
+      "orders_local",
+      "discountTotal",
+      "discountTotal REAL DEFAULT 0",
+    );
+
+    console.log("📦 SQLite tables created / migrated OK");
   } catch (err) {
-    console.log('SQLite initDatabase error:', err);
+    console.log("SQLite initDatabase error:", err);
     throw err;
   }
 }

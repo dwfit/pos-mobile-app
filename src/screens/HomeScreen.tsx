@@ -1,5 +1,5 @@
 // src/screens/HomeScreen.tsx
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from "react";
 import {
   View,
   Text,
@@ -7,11 +7,14 @@ import {
   StyleSheet,
   ActivityIndicator,
   Alert,
-} from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { post, get } from '../lib/api';
-import { saveTokens, clearAllTokens } from '../lib/auth';
-import { getDb, initDatabase } from '../database/db';
+} from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { post, get } from "../lib/api";
+import { saveTokens, clearAllTokens } from "../lib/auth";
+import { getDb, initDatabase } from "../database/db";
+
+// ✅ modern popup
+import ModernDialog from "../components/ModernDialog";
 
 const PIN_LENGTH = 5;
 
@@ -32,6 +35,7 @@ type LocalUser = {
 async function ensureUsersTable() {
   await initDatabase();
   const db = getDb();
+
   await db.runAsync(`
     CREATE TABLE IF NOT EXISTS users_cache (
       id        TEXT PRIMARY KEY,
@@ -62,19 +66,18 @@ async function saveUsersToSQLite(users: any[], branchId: string): Promise<void> 
   const now = new Date().toISOString();
 
   await db.withTransactionAsync(async () => {
-    await db.runAsync('DELETE FROM users_cache WHERE branchId = ?;', [branchId]);
+    await db.runAsync("DELETE FROM users_cache WHERE branchId = ?;", [branchId]);
 
     for (const u of users) {
       const id = String(u.id);
-      const name = String(u.name ?? '');
+      const name = String(u.name ?? "");
       const email = u.email ?? null;
       const appRole = u.appRole ?? null;
       const roleName = u.roleName ?? null;
       const pin = u.pin ?? u.loginPin ?? null;
       const isActive = u.isActive === false ? 0 : 1;
-      const permissions: string[] = Array.isArray(u.permissions)
-        ? u.permissions
-        : [];
+
+      const permissions: string[] = Array.isArray(u.permissions) ? u.permissions : [];
 
       await db.runAsync(
         `INSERT OR REPLACE INTO users_cache
@@ -91,7 +94,7 @@ async function saveUsersToSQLite(users: any[], branchId: string): Promise<void> 
           isActive,
           now,
           JSON.stringify(permissions),
-        ],
+        ]
       );
     }
   });
@@ -99,7 +102,7 @@ async function saveUsersToSQLite(users: any[], branchId: string): Promise<void> 
 
 async function findLocalUserByPin(
   branchId: string,
-  pin: string,
+  pin: string
 ): Promise<LocalUser | null> {
   if (!branchId || !pin) return null;
 
@@ -111,7 +114,7 @@ async function findLocalUserByPin(
       `SELECT * FROM users_cache
        WHERE branchId = ? AND pin = ? AND isActive = 1
        LIMIT 1`,
-      [branchId, pin],
+      [branchId, pin]
     );
 
     if (!row) return null;
@@ -135,7 +138,7 @@ async function findLocalUserByPin(
       permissions,
     };
   } catch (err) {
-    console.log('SQLite findLocalUserByPin error:', err);
+    console.log("SQLite findLocalUserByPin error:", err);
     return null;
   }
 }
@@ -143,20 +146,35 @@ async function findLocalUserByPin(
 /* -------------------- COMPONENT -------------------- */
 
 export default function HomeScreen({ navigation, online }: any) {
-  const [pin, setPin] = useState('');
+  const [pin, setPin] = useState("");
   const [loading, setLoading] = useState(false);
 
   const [branchId, setBranchId] = useState<string | null>(null);
   const [branchName, setBranchName] = useState<string | null>(null);
-
   const [brandName, setBrandName] = useState<string | null>(null);
+
+  // ✅ Modern dialog state MUST be inside component
+  const [syncDialog, setSyncDialog] = useState({
+    visible: false,
+    title: "",
+    message: "",
+    tone: "info" as "info" | "success" | "error",
+  });
+
+  function showDialog(
+    tone: "info" | "success" | "error",
+    title: string,
+    message: string
+  ) {
+    setSyncDialog({ visible: true, tone, title, message });
+  }
 
   useEffect(() => {
     (async () => {
       try {
         await ensureUsersTable();
       } catch (e) {
-        console.log('ensureUsersTable error', e);
+        console.log("ensureUsersTable error", e);
       }
     })();
   }, []);
@@ -166,7 +184,7 @@ export default function HomeScreen({ navigation, online }: any) {
     (async () => {
       try {
         // 1) deviceInfo (most common)
-        const raw = await AsyncStorage.getItem('deviceInfo');
+        const raw = await AsyncStorage.getItem("deviceInfo");
         if (raw) {
           const device = JSON.parse(raw);
 
@@ -193,17 +211,16 @@ export default function HomeScreen({ navigation, online }: any) {
           if (brId) setBranchId(String(brId));
         }
 
-        // 2) fallback: some apps store brand/branch separately
-        // brand fallbacks
+        // 2) fallback: brand stored separately
         if (!brandName) {
           const candidates = [
-            'pos_brand',
-            'brandInfo',
-            'brand',
-            'selectedBrand',
-            'currentBrand',
-            'activeBrand',
-            'brand_settings',
+            "pos_brand",
+            "brandInfo",
+            "brand",
+            "selectedBrand",
+            "currentBrand",
+            "activeBrand",
+            "brand_settings",
           ];
 
           for (const k of candidates) {
@@ -225,7 +242,6 @@ export default function HomeScreen({ navigation, online }: any) {
                 break;
               }
             } catch {
-              // plain string value
               if (v && v.length > 0) {
                 setBrandName(String(v));
                 break;
@@ -234,9 +250,9 @@ export default function HomeScreen({ navigation, online }: any) {
           }
         }
 
-        // branch fallbacks
+        // 3) fallback: branch stored separately
         if (!branchName || !branchId) {
-          const candidates = ['pos_branch', 'branchInfo', 'branch', 'selectedBranch'];
+          const candidates = ["pos_branch", "branchInfo", "branch", "selectedBranch"];
 
           for (const k of candidates) {
             const v = await AsyncStorage.getItem(k);
@@ -245,7 +261,11 @@ export default function HomeScreen({ navigation, online }: any) {
             try {
               const obj = JSON.parse(v);
               const brName =
-                obj?.name || obj?.branch?.name || obj?.title || obj?.branchName || null;
+                obj?.name ||
+                obj?.branch?.name ||
+                obj?.title ||
+                obj?.branchName ||
+                null;
               const brId = obj?.id || obj?.branch?.id || obj?.branchId || null;
 
               if (!branchName && brName) setBranchName(String(brName));
@@ -258,7 +278,7 @@ export default function HomeScreen({ navigation, online }: any) {
           }
         }
       } catch (e) {
-        console.log('Failed to load brand/branch info', e);
+        console.log("Failed to load brand/branch info", e);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -267,21 +287,17 @@ export default function HomeScreen({ navigation, online }: any) {
   useEffect(() => {
     (async () => {
       try {
-        const raw = await AsyncStorage.getItem('deviceInfo');
+        const raw = await AsyncStorage.getItem("deviceInfo");
         if (!raw) return;
 
         const device = JSON.parse(raw);
 
-        // existing
         setBranchId(device.branchId || device.branch?.id || null);
         setBranchName(device.branch?.name || device.branchName || null);
 
-        // try stored brand first
-        const storedBrand =
-          device.brand?.name || device.brandName || null;
+        const storedBrand = device.brand?.name || device.brandName || null;
         if (storedBrand) setBrandName(storedBrand);
 
-        // ✅ fallback: fetch from API by deviceId if brand missing
         const deviceId = device.id;
         if (deviceId && !storedBrand) {
           const live: any = await get(`/devices/${deviceId}`);
@@ -291,7 +307,6 @@ export default function HomeScreen({ navigation, online }: any) {
           if (liveBrandName) setBrandName(liveBrandName);
           if (liveBranchName) setBranchName(liveBranchName);
 
-          // ✅ also update stored deviceInfo so next time it loads instantly
           const merged = {
             ...device,
             branch: live?.branch ?? device.branch ?? null,
@@ -299,21 +314,20 @@ export default function HomeScreen({ navigation, online }: any) {
             brandName: liveBrandName ?? device.brandName ?? null,
             branchName: liveBranchName ?? device.branchName ?? null,
           };
-          await AsyncStorage.setItem('deviceInfo', JSON.stringify(merged));
+          await AsyncStorage.setItem("deviceInfo", JSON.stringify(merged));
         }
       } catch (e) {
-        console.log('Failed to load deviceInfo / fetch brand', e);
+        console.log("Failed to load deviceInfo / fetch brand", e);
       }
     })();
   }, []);
-
 
   const handleChangePin = useCallback(
     (digit: string) => {
       if (loading) return;
 
-      if (digit === 'C') {
-        setPin('');
+      if (digit === "C") {
+        setPin("");
         return;
       }
 
@@ -321,49 +335,43 @@ export default function HomeScreen({ navigation, online }: any) {
 
       setPin(pin + digit);
     },
-    [pin, loading],
+    [pin, loading]
   );
 
   const loginWithPinOnline = useCallback(
     async (p: string) => {
       if (!branchId) {
         Alert.alert(
-          'Device not activated',
-          'This device is not linked to a branch. Please activate the device first.',
+          "Device not activated",
+          "This device is not linked to a branch. Please activate the device first."
         );
-        setPin('');
+        setPin("");
         return;
       }
 
       try {
         setLoading(true);
 
-        const res: any = await post('/auth/login-pin', { pin: p, branchId });
+        const res: any = await post("/auth/login-pin", { pin: p, branchId });
 
-        setPin('');
+        setPin("");
 
-        const permissions: string[] = Array.isArray(res.permissions)
-          ? res.permissions
-          : [];
+        const permissions: string[] = Array.isArray(res.permissions) ? res.permissions : [];
 
         const accessToken =
-          typeof res.accessToken === 'string'
+          typeof res.accessToken === "string"
             ? res.accessToken
-            : typeof res.token === 'string'
+            : typeof res.token === "string"
               ? res.token
               : null;
 
-        const refreshToken =
-          typeof res.refreshToken === 'string' ? res.refreshToken : null;
+        const refreshToken = typeof res.refreshToken === "string" ? res.refreshToken : null;
 
         if (accessToken && refreshToken) {
           await saveTokens(accessToken, refreshToken);
         }
 
-        const branchObj = res.branch ?? {
-          id: branchId,
-          name: branchName ?? '',
-        };
+        const branchObj = res.branch ?? { id: branchId, name: branchName ?? "" };
 
         const userPayload: LocalUser = {
           id: res.id,
@@ -376,8 +384,8 @@ export default function HomeScreen({ navigation, online }: any) {
         };
 
         await AsyncStorage.multiSet([
-          ['pos_user', JSON.stringify(userPayload)],
-          ['pos_branch', JSON.stringify(branchObj)],
+          ["pos_user", JSON.stringify(userPayload)],
+          ["pos_branch", JSON.stringify(branchObj)],
         ]);
 
         try {
@@ -394,55 +402,52 @@ export default function HomeScreen({ navigation, online }: any) {
                 permissions,
               },
             ],
-            branchId,
+            branchId
           );
         } catch (cacheErr) {
-          console.log('Cache single user (online login) err:', cacheErr);
+          console.log("Cache single user (online login) err:", cacheErr);
         }
 
         navigation.reset({
           index: 0,
           routes: [
             {
-              name: 'ClockIn',
+              name: "ClockIn",
               params: {
                 branchId: branchObj?.id ?? null,
-                branchName: branchObj?.name ?? '',
+                branchName: branchObj?.name ?? "",
                 userName: res.name,
               },
             },
           ],
         });
       } catch (err: any) {
-        console.log('LOGIN PIN ERR', err);
-        setPin('');
-        const msg = String(err?.message || '');
-        if (msg.includes('OFFLINE_MODE')) {
+        console.log("LOGIN PIN ERR", err);
+        setPin("");
+        const msg = String(err?.message || "");
+        if (msg.includes("OFFLINE_MODE")) {
           Alert.alert(
-            'Offline',
-            'You appear to be offline. Please connect to the internet for online login, or use offline PIN login with cached users.',
+            "Offline",
+            "You appear to be offline. Please connect to the internet for online login, or use offline PIN login with cached users."
           );
         } else {
-          Alert.alert(
-            'Login failed',
-            'Invalid PIN or this user is not assigned to this branch.',
-          );
+          Alert.alert("Login failed", "Invalid PIN or this user is not assigned to this branch.");
         }
       } finally {
         setLoading(false);
       }
     },
-    [branchId, branchName, navigation],
+    [branchId, branchName, navigation]
   );
 
   const loginWithPinOffline = useCallback(
     async (p: string) => {
       if (!branchId) {
         Alert.alert(
-          'Device not activated',
-          'This device is not linked to a branch. Please activate the device first.',
+          "Device not activated",
+          "This device is not linked to a branch. Please activate the device first."
         );
-        setPin('');
+        setPin("");
         return;
       }
 
@@ -451,19 +456,19 @@ export default function HomeScreen({ navigation, online }: any) {
 
         const user = await findLocalUserByPin(branchId, p);
         if (!user) {
-          setPin('');
+          setPin("");
           Alert.alert(
-            'Offline login failed',
-            'No offline user found for this PIN. Please sync users while online.',
+            "Offline login failed",
+            "No offline user found for this PIN. Please sync users while online."
           );
           return;
         }
 
-        const branchRaw = await AsyncStorage.getItem('pos_branch');
+        const branchRaw = await AsyncStorage.getItem("pos_branch");
         const branchObj = branchRaw ? JSON.parse(branchRaw) : null;
 
         await AsyncStorage.setItem(
-          'pos_user',
+          "pos_user",
           JSON.stringify({
             id: user.id,
             name: user.name,
@@ -472,36 +477,33 @@ export default function HomeScreen({ navigation, online }: any) {
             roleName: user.roleName,
             branchId: user.branchId ?? branchId,
             permissions: user.permissions ?? [],
-          } as LocalUser),
+          } as LocalUser)
         );
 
         navigation.reset({
           index: 0,
           routes: [
             {
-              name: 'ClockIn',
+              name: "ClockIn",
               params: {
                 branchId: branchObj?.id ?? branchId,
-                branchName: branchObj?.name ?? branchName ?? '',
+                branchName: branchObj?.name ?? branchName ?? "",
                 userName: user.name,
               },
             },
           ],
         });
 
-        setPin('');
+        setPin("");
       } catch (err) {
-        console.log('OFFLINE LOGIN ERR', err);
-        setPin('');
-        Alert.alert(
-          'Offline login failed',
-          'Unable to login offline. Please try again or use online login.',
-        );
+        console.log("OFFLINE LOGIN ERR", err);
+        setPin("");
+        Alert.alert("Offline login failed", "Unable to login offline. Please try again or use online login.");
       } finally {
         setLoading(false);
       }
     },
-    [branchId, branchName, navigation],
+    [branchId, branchName, navigation]
   );
 
   const loginWithPin = useCallback(
@@ -509,7 +511,7 @@ export default function HomeScreen({ navigation, online }: any) {
       if (online) await loginWithPinOnline(p);
       else await loginWithPinOffline(p);
     },
-    [online, loginWithPinOnline, loginWithPinOffline],
+    [online, loginWithPinOnline, loginWithPinOffline]
   );
 
   useEffect(() => {
@@ -521,43 +523,44 @@ export default function HomeScreen({ navigation, online }: any) {
   const onSyncUsers = async () => {
     if (!branchId) {
       Alert.alert(
-        'Device not activated',
-        'Cannot sync users because this device is not linked to any branch.',
+        "Device not activated",
+        "Cannot sync users because this device is not linked to any branch."
       );
       return;
     }
 
     if (!online) {
-      Alert.alert('Offline', 'You are offline. Connect to the internet to sync users.');
+      showDialog("info", "Offline", "You are offline. Connect to the internet to sync users.");
       return;
     }
 
     try {
       setLoading(true);
 
-      const res: any = await post('/auth/sync-users', { branchId });
+      const res: any = await post("/auth/sync-users", { branchId });
       const list: any[] = Array.isArray(res) ? res : res?.users ?? [];
 
       if (!Array.isArray(list) || list.length === 0) {
-        Alert.alert('Sync finished', 'No users returned from server.');
+        showDialog("info", "Sync finished", "No users returned from server.");
       } else {
         await saveUsersToSQLite(list, branchId);
-        Alert.alert('Sync finished', `Synced ${list.length} users.`);
+        showDialog("success", "Sync finished", `Synced ${list.length} users.`);
       }
     } catch (e: any) {
-      console.log('SYNC USERS ERR', e);
-      const msg = String(e?.message || '');
+      console.log("SYNC USERS ERR", e);
+      const msg = String(e?.message || "");
 
-      if (msg.includes('SESSION_EXPIRED')) {
+      if (msg.includes("SESSION_EXPIRED")) {
         await clearAllTokens();
-        Alert.alert(
-          'Session expired',
-          'Online session has expired. Please login again with PIN while online. You can still use offline PIN with cached users.',
+        showDialog(
+          "error",
+          "Session expired",
+          "Online session has expired. Please login again with PIN while online. You can still use offline PIN with cached users."
         );
-      } else if (msg.includes('OFFLINE_MODE')) {
-        Alert.alert('Offline', 'You appear to be offline. Connect to the internet to sync users.');
+      } else if (msg.includes("OFFLINE_MODE")) {
+        showDialog("info", "Offline", "You appear to be offline. Connect to the internet to sync users.");
       } else {
-        Alert.alert('Sync failed', 'Unable to sync users. Please try again.');
+        showDialog("error", "Sync failed", "Unable to sync users. Please try again.");
       }
     } finally {
       setLoading(false);
@@ -567,19 +570,16 @@ export default function HomeScreen({ navigation, online }: any) {
   const renderDots = () => (
     <View style={styles.dotsRow}>
       {Array.from({ length: PIN_LENGTH }).map((_, i) => (
-        <View
-          key={i}
-          style={[styles.dot, i < pin.length ? styles.dotFilled : styles.dotEmpty]}
-        />
+        <View key={i} style={[styles.dot, i < pin.length ? styles.dotFilled : styles.dotEmpty]} />
       ))}
     </View>
   );
 
   const keypadDigits = [
-    ['1', '2', '3'],
-    ['4', '5', '6'],
-    ['7', '8', '9'],
-    ['0', 'C'],
+    ["1", "2", "3"],
+    ["4", "5", "6"],
+    ["7", "8", "9"],
+    ["0", "C"],
   ];
 
   return (
@@ -617,17 +617,24 @@ export default function HomeScreen({ navigation, online }: any) {
 
         {/* ✅ Footer: ONLY Brand + Branch + Status */}
         <View style={styles.footer}>
+          <Text style={styles.footerText}>Brand: {brandName ? brandName : "#N/A"}</Text>
           <Text style={styles.footerText}>
-            Brand: {brandName ? brandName : '#N/A'}
+            {branchName ? `Branch: ${branchName}` : "Branch: Not linked (activate device)"}
           </Text>
-          <Text style={styles.footerText}>
-            {branchName ? `Branch: ${branchName}` : 'Branch: Not linked (activate device)'}
-          </Text>
-          <Text style={styles.footerText}>
-            Status: {online ? 'Online' : 'Offline'}
-          </Text>
+          <Text style={styles.footerText}>Status: {online ? "Online" : "Offline"}</Text>
         </View>
       </View>
+
+      {/* ✅ Modern stylish popup (render once, at screen root) */}
+      <ModernDialog
+        visible={syncDialog.visible}
+        tone={syncDialog.tone}
+        title={syncDialog.title}
+        message={syncDialog.message}
+        primaryText="Done"
+        onPrimary={() => setSyncDialog((p) => ({ ...p, visible: false }))}
+        onClose={() => setSyncDialog((p) => ({ ...p, visible: false }))}
+      />
     </View>
   );
 }
@@ -635,98 +642,63 @@ export default function HomeScreen({ navigation, online }: any) {
 const styles = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: '#020617',
-    alignItems: 'center',
-    justifyContent: 'center',
+    backgroundColor: "#020617",
+    alignItems: "center",
+    justifyContent: "center",
   },
   card: {
-    width: '80%',
+    width: "80%",
     maxWidth: 600,
-    backgroundColor: '#f9fafb',
+    backgroundColor: "#f9fafb",
     borderRadius: 24,
     paddingVertical: 40,
     paddingHorizontal: 32,
-    alignItems: 'center',
+    alignItems: "center",
   },
   logo: {
     fontSize: 26,
-    fontWeight: '700',
+    fontWeight: "700",
     letterSpacing: 2,
-    color: '#111827',
+    color: "#111827",
     marginBottom: 4,
   },
   subtitle: {
     fontSize: 16,
-    color: '#4b5563',
+    color: "#4b5563",
     marginBottom: 24,
   },
-  dotsRow: {
-    flexDirection: 'row',
-    marginBottom: 32,
-  },
-  dot: {
-    width: 16,
-    height: 16,
-    borderRadius: 8,
-    marginHorizontal: 6,
-  },
+  dotsRow: { flexDirection: "row", marginBottom: 32 },
+  dot: { width: 16, height: 16, borderRadius: 8, marginHorizontal: 6 },
   dotEmpty: {
     borderWidth: 1,
-    borderColor: '#cbd5f5',
-    backgroundColor: 'transparent',
+    borderColor: "#cbd5f5",
+    backgroundColor: "transparent",
   },
-  dotFilled: {
-    backgroundColor: '#000000',
-  },
-  keypad: {
-    width: '100%',
-    marginBottom: 24,
-  },
-  keypadRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 12,
-  },
+  dotFilled: { backgroundColor: "#000000" },
+  keypad: { width: "100%", marginBottom: 24 },
+  keypadRow: { flexDirection: "row", justifyContent: "space-between", marginBottom: 12 },
   key: {
     flex: 1,
     marginHorizontal: 6,
     paddingVertical: 18,
     borderRadius: 16,
-    backgroundColor: '#e5e7eb',
-    alignItems: 'center',
-    justifyContent: 'center',
+    backgroundColor: "#e5e7eb",
+    alignItems: "center",
+    justifyContent: "center",
   },
-  keyPressed: {
-    backgroundColor: '#d1d5db',
-  },
-  keyText: {
-    fontSize: 22,
-    fontWeight: '600',
-    color: '#111827',
-  },
+  keyPressed: { backgroundColor: "#d1d5db" },
+  keyText: { fontSize: 22, fontWeight: "600", color: "#111827" },
   syncButton: {
     marginTop: 4,
-    width: '80%',
+    width: "80%",
     paddingVertical: 14,
     borderRadius: 16,
-    backgroundColor: '#111827',
-    alignItems: 'center',
-    justifyContent: 'center',
+    backgroundColor: "#111827",
+    alignItems: "center",
+    justifyContent: "center",
   },
-  syncButtonPressed: {
-    opacity: 0.9,
-  },
-  syncText: {
-    color: '#f9fafb',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  footer: {
-    marginTop: 24,
-    width: '100%',
-  },
-  footerText: {
-    fontSize: 12,
-    color: '#6b7280',
-  },
+  syncButtonPressed: { opacity: 0.9 },
+  syncText: { color: "#f9fafb", fontSize: 16, fontWeight: "600" },
+  footer: { marginTop: 24, width: "100%" },
+  footerText: { fontSize: 12, color: "#6b7280" },
 });

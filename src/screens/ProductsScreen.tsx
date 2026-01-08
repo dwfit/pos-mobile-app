@@ -26,6 +26,9 @@ import { usePriceTierStore, type PriceTier } from '../store/priceTierStore';
 import { useOrderTypeStore } from "../store/orderTypeStore";
 import { MaterialIcons } from "@expo/vector-icons";
 import { printReceiptForOrder, printKitchenTicket } from "../printing/printerService";
+import { closeLocalTill, getLocalTillSession, } from "../database/clockLocal";
+import { generateTillCloseReport } from "../reports/tillCloseReport";
+import { printTillCloseReport, type TillCloseReport, } from "../printing/printerService";
 
 type ProductSize = {
   id: string;
@@ -260,11 +263,13 @@ function normalizeOrderTypeLabel(
   return fallback;
 }
 /* ------------------------ Till Till session ------------------------ */
-async function handleOpenOrCloseTill() {
+async function handleOpenOrCloseTill(opts: { tillOpen: boolean; setTillOpen: (v: boolean) => void; setHomeMenuVisible: (v: boolean) => void; setConfirmCloseVisible: (v: boolean) => void; }) {
+  const { tillOpen, setTillOpen, setHomeMenuVisible, setConfirmCloseVisible } = opts;
+
   try {
     if (!tillOpen) {
-      // OPEN TILL
-      const res: any = await post("/pos/till/open", { openingCash: 0 }); // or show a modal to enter amount
+      // OPEN TILL (keep your current logic)
+      const res: any = await post("/pos/till/open", { openingCash: 0 });
 
       await AsyncStorage.multiSet([
         ["pos_till_opened", "1"],
@@ -273,32 +278,19 @@ async function handleOpenOrCloseTill() {
 
       setTillOpen(true);
       Alert.alert("Till opened", "Till opened successfully.");
-    } else {
-      // CLOSE TILL
-      const tillId = await AsyncStorage.getItem("pos_till_session_id");
-      const res: any = await post("/pos/till/close", {
-        tillSessionId: tillId || undefined,
-        closingCash: 0, // later you can ask the cashier
-      });
-
-      await AsyncStorage.multiSet([
-        ["pos_till_opened", "0"],
-        ["pos_till_session_id", ""],
-      ]);
-
-      setTillOpen(false);
-      Alert.alert("Till closed", "Till closed successfully.");
+      setHomeMenuVisible(false);
+      return;
     }
+
+    // ✅ CLOSE TILL -> open popup flow
+    setHomeMenuVisible(false);
+    setConfirmCloseVisible(true);
   } catch (e: any) {
     console.log("handleOpenOrCloseTill error", e);
     Alert.alert("Error", e?.message || "Till operation failed.");
-  } finally {
     setHomeMenuVisible(false);
   }
 }
-
-
-
 /* ------------------------ Tier pricing helpers (shared across screens) ------------------------ */
 function collectTierIdsFromCart(items: CartItem[]) {
   const productSizeIds: string[] = [];
@@ -498,6 +490,7 @@ export default function ProductsScreen({
   setActiveOrderId,
 }: any) {
 
+
   const isOnline = online ?? true;
 
   const { categoryId, branchName, userName, goBack, reopenFromCallcenter } =
@@ -584,6 +577,14 @@ export default function ProductsScreen({
   const [homeMenuVisible, setHomeMenuVisible] = useState(false);
   // Handy alias for cart
   const cartItems: CartItem[] = Array.isArray(cart) ? (cart as CartItem[]) : [];
+  // ===== close-till flow =====
+  const [confirmCloseVisible, setConfirmCloseVisible] = useState(false);
+  const [closeAmountVisible, setCloseAmountVisible] = useState(false);
+  const [printPromptVisible, setPrintPromptVisible] = useState(false);
+  const [tillCloseAmount, setTillCloseAmount] = useState("");
+
+  const [lastReport, setLastReport] = useState<TillCloseReport | null>(null);
+
 
   // ✅ Hydrate shared tier store (so tier from CategoryScreen is visible here)
   useEffect(() => {
@@ -916,113 +917,113 @@ export default function ProductsScreen({
     };
   }, [online, categoryId]);
 
-    /* ------------------------ POS CONFIG (VAT, payments, discounts) ------------------------ */
-useEffect(() => {
-  let mounted = true;
+  /* ------------------------ POS CONFIG (VAT, payments, discounts) ------------------------ */
+  useEffect(() => {
+    let mounted = true;
 
-  async function loadConfig() {
-    try {
-      const cfg: any = await get("/pos/config");
-      console.log("📦 POS CONFIG (ProductsScreen):", cfg);
-      if (!mounted) return;
+    async function loadConfig() {
+      try {
+        const cfg: any = await get("/pos/config");
+        console.log("📦 POS CONFIG (ProductsScreen):", cfg);
+        if (!mounted) return;
 
-      // VAT
-      const vat = cfg?.vatRate;
-      if (typeof vat === "number") {
-        setVatRate(vat);
-      }
+        // VAT
+        const vat = cfg?.vatRate;
+        if (typeof vat === "number") {
+          setVatRate(vat);
+        }
 
-      // PAYMENT METHODS  ➜ same behaviour as CategoryScreen
-      const methods = cfg?.paymentMethods;
-      if (Array.isArray(methods)) {
-        setPaymentMethods(
-          methods.map((m: any) => ({
-            id: String(m.id),
-            code: m.code ?? null,
-            name: String(m.name),
-          }))
-        );
-      }
+        // PAYMENT METHODS  ➜ same behaviour as CategoryScreen
+        const methods = cfg?.paymentMethods;
+        if (Array.isArray(methods)) {
+          setPaymentMethods(
+            methods.map((m: any) => ({
+              id: String(m.id),
+              code: m.code ?? null,
+              name: String(m.name),
+            }))
+          );
+        }
 
-      // DISCOUNTS (keep your existing mapping logic)
-      const rawDiscounts = cfg?.discounts;
+        // DISCOUNTS (keep your existing mapping logic)
+        const rawDiscounts = cfg?.discounts;
 
-      if (Array.isArray(rawDiscounts)) {
-        const mapped: DiscountConfig[] = rawDiscounts.map((d: any) => {
-          const modeRaw = String(d.mode || d.type || "AMOUNT").toUpperCase();
-          const mode: "AMOUNT" | "PERCENT" = modeRaw.includes("PERCENT")
-            ? "PERCENT"
-            : "AMOUNT";
+        if (Array.isArray(rawDiscounts)) {
+          const mapped: DiscountConfig[] = rawDiscounts.map((d: any) => {
+            const modeRaw = String(d.mode || d.type || "AMOUNT").toUpperCase();
+            const mode: "AMOUNT" | "PERCENT" = modeRaw.includes("PERCENT")
+              ? "PERCENT"
+              : "AMOUNT";
 
-          const scopeRaw = d.scope || d.applyTo || "ORDER";
-          const scope: "ORDER" | "ITEM" =
-            String(scopeRaw).toUpperCase() === "ITEM" ? "ITEM" : "ORDER";
+            const scopeRaw = d.scope || d.applyTo || "ORDER";
+            const scope: "ORDER" | "ITEM" =
+              String(scopeRaw).toUpperCase() === "ITEM" ? "ITEM" : "ORDER";
 
-          const value = Number(d.value ?? d.amount ?? 0) || 0;
+            const value = Number(d.value ?? d.amount ?? 0) || 0;
 
-          const branchIds: string[] = Array.isArray(d.branchIds)
-            ? d.branchIds.map((x: any) => String(x))
-            : [];
+            const branchIds: string[] = Array.isArray(d.branchIds)
+              ? d.branchIds.map((x: any) => String(x))
+              : [];
 
-          const categoryIds: string[] = Array.isArray(d.categoryIds)
-            ? d.categoryIds.map((x: any) => String(x))
-            : [];
+            const categoryIds: string[] = Array.isArray(d.categoryIds)
+              ? d.categoryIds.map((x: any) => String(x))
+              : [];
 
-          const productIds: string[] = Array.isArray(d.productIds)
-            ? d.productIds.map((x: any) => String(x))
-            : [];
+            const productIds: string[] = Array.isArray(d.productIds)
+              ? d.productIds.map((x: any) => String(x))
+              : [];
 
-          const productSizeIds: string[] = Array.isArray(d.productSizeIds)
-            ? d.productSizeIds.map((x: any) => String(x))
-            : [];
+            const productSizeIds: string[] = Array.isArray(d.productSizeIds)
+              ? d.productSizeIds.map((x: any) => String(x))
+              : [];
 
-          const orderTypesRaw: string[] =
-            typeof d.orderTypes === "string"
-              ? d.orderTypes
+            const orderTypesRaw: string[] =
+              typeof d.orderTypes === "string"
+                ? d.orderTypes
                   .split(",")
                   .map((s: any) => String(s).trim())
                   .filter(Boolean)
-              : Array.isArray(d.orderTypes)
-              ? d.orderTypes.map((x: any) => String(x))
-              : [];
+                : Array.isArray(d.orderTypes)
+                  ? d.orderTypes.map((x: any) => String(x))
+                  : [];
 
-          const orderTypes: string[] = orderTypesRaw
-            .map((x) => normalizeOrderTypeLabel(x))
-            .filter((x): x is string => !!x);
+            const orderTypes: string[] = orderTypesRaw
+              .map((x) => normalizeOrderTypeLabel(x))
+              .filter((x): x is string => !!x);
 
-          const applyAllBranches = !!d.applyAllBranches;
+            const applyAllBranches = !!d.applyAllBranches;
 
-          return {
-            id: String(d.id),
-            name: String(d.name || d.code || "Discount"),
-            mode,
-            value,
-            scope,
-            branchIds,
-            categoryIds,
-            productIds,
-            productSizeIds,
-            orderTypes,
-            applyAllBranches,
-          };
-        });
+            return {
+              id: String(d.id),
+              name: String(d.name || d.code || "Discount"),
+              mode,
+              value,
+              scope,
+              branchIds,
+              categoryIds,
+              productIds,
+              productSizeIds,
+              orderTypes,
+              applyAllBranches,
+            };
+          });
 
-        setDiscountConfigs(mapped);
-      } else {
-        setDiscountConfigs([]);
+          setDiscountConfigs(mapped);
+        } else {
+          setDiscountConfigs([]);
+        }
+      } catch (err) {
+        console.log("POS CONFIG ERR (ProductsScreen):", err);
       }
-    } catch (err) {
-      console.log("POS CONFIG ERR (ProductsScreen):", err);
     }
-  }
 
-  loadConfig();
-  return () => {
-    mounted = false;
-  };
-}, []);
+    loadConfig();
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
-  
+
   /* ------------------------ SYNC PriceTier ------------------------ */
   useEffect(() => {
     let mounted = true;
@@ -1639,22 +1640,22 @@ useEffect(() => {
     if (remaining > 0.01) return;
     if (!payments.length) return;
     if (!ensureBrandAndDevice()) return;
-  
+
     try {
       setPaying(true);
-  
+
       const discountPayload = appliedDiscount
         ? {
-            kind: appliedDiscount.kind,
-            value: appliedDiscount.value,
-            amount: discountAmount,
-          }
+          kind: appliedDiscount.kind,
+          value: appliedDiscount.value,
+          amount: discountAmount,
+        }
         : null;
-  
+
       const basePayload: any = {
         brandId,
         deviceId,
-  
+
         vatRate,
         subtotalEx,
         vatAmount,
@@ -1672,22 +1673,22 @@ useEffect(() => {
           modifiers:
             i.modifiers && i.modifiers.length > 0
               ? i.modifiers.map((m) => ({
-                  modifierItemId: m.itemId,
-                  price: m.price,
-                  qty: 1,
-                }))
+                modifierItemId: m.itemId,
+                price: m.price,
+                qty: 1,
+              }))
               : [],
         })),
         payments,
       };
-  
+
       if (selectedCustomer?.id) {
         basePayload.customerId = String(selectedCustomer.id);
       }
-  
+
       // 🔹 Capture response / orderNo for printing
       let orderNoForReceipt: string | null = null;
-  
+
       if (activeOrderId) {
         const resp = await post(`/orders/${activeOrderId}/close`, basePayload);
         orderNoForReceipt = resp?.orderNo
@@ -1700,11 +1701,11 @@ useEffect(() => {
           status: 'CLOSED',
           ...basePayload,
         };
-  
+
         const resp = await post('/pos/orders', payload);
         orderNoForReceipt = resp?.orderNo ? String(resp.orderNo) : null;
       }
-  
+
       // 🔹 Auto-print after successful payment
       try {
         await printReceiptForOrder({
@@ -1714,7 +1715,7 @@ useEffect(() => {
           orderNo: orderNoForReceipt,
           orderType: orderType || null,
           businessDate: new Date(),
-  
+
           cart: cart as CartItem[],
           subtotal: subtotalEx,
           vatAmount,
@@ -1733,10 +1734,10 @@ useEffect(() => {
         await printKitchenTicket({
           brandName,
           branchName,
-          userName,                     
+          userName,
           orderNo: orderNoForReceipt,
           orderType: orderType || null,
-          businessDate: new Date(), 
+          businessDate: new Date(),
           tableName: null,
           notes: null,
           cart: cart as CartItem[],
@@ -1744,7 +1745,7 @@ useEffect(() => {
       } catch (kErr) {
         console.log("⚠️ printKitchenTicket error (ignored):", kErr);
       }
-    
+
       // 🔁 Reset UI after payment
       setCart([]);
       setPayments([]);
@@ -1752,7 +1753,7 @@ useEffect(() => {
       setActiveOrderId(null);
       setSelectedCustomer(null);
       setAppliedDiscount(null);
-  
+
       await syncOrdersCache();
     } catch (err) {
       console.log('PAY /orders/:id/close ERROR (ProductsScreen)', err);
@@ -1760,7 +1761,7 @@ useEffect(() => {
       setPaying(false);
     }
   }
-  
+
   async function handleNewOrder() {
     if (readOnlyCart) return;
     const cartItems = cart as CartItem[];
@@ -2042,7 +2043,7 @@ useEffect(() => {
         console.log("No items in cart to print");
         return;
       }
-  
+
       await printReceiptForOrder({
         brandName,
         branchName,
@@ -2050,7 +2051,7 @@ useEffect(() => {
         orderNo: null, // if you have last orderNo in state, pass it here
         orderType,
         businessDate: new Date(),
-  
+
         cart: cartItems,
         subtotal: subtotalEx,
         vatAmount,
@@ -2065,7 +2066,7 @@ useEffect(() => {
       console.log("handlePrintCurrentOrder error", e);
     }
   }
-  
+
 
   const actions: ActionButton[] = [
     {
@@ -2101,6 +2102,93 @@ useEffect(() => {
     { label: 'DELIVERY', value: 'DELIVERY' },
     { label: 'DRIVE THRU', value: 'DRIVE_THRU' },
   ];
+
+  // Close Till
+  function handleKeypadPress(key: string) {
+    if (key === "C") {
+      setTillCloseAmount("");
+      return;
+    }
+    setTillCloseAmount((prev) => (prev || "") + key);
+  }
+
+  async function actuallyCloseTill(closingCash: number) {
+    try {
+      const localTillId = await AsyncStorage.getItem("pos_till_session_id");
+      if (!localTillId) throw new Error("Missing till session id");
+
+      // 1) save local till close
+      await closeLocalTill(localTillId, closingCash);
+
+      // 2) load session for report
+      const session = await getLocalTillSession(localTillId);
+
+      // 3) build report
+      const openedAt = String(session.openedAt);
+      const closedAt = String(session.closedAt || new Date().toISOString());
+
+      const report = await generateTillCloseReport({
+        tillSessionId: localTillId,
+        branchId,
+        brandId,
+        deviceId,
+        branchName,
+        userName,
+        openingCash: Number(session.openingCash || 0),
+        closingCash: Number(session.closingCash || closingCash),
+        openedAt,
+        closedAt,
+      });
+
+      setLastReport(report);
+
+      // 4) clear flags
+      await AsyncStorage.multiSet([
+        ["pos_till_opened", "0"],
+        ["pos_till_session_id", ""],
+      ]);
+
+      setTillOpen(false);
+      setTillCloseAmount("");
+
+      // 5) sync online (if your "online" prop is true)
+      if (online) {
+        try {
+          await post("/pos/till/close", {
+            branchId,
+            brandId,
+            deviceId,
+            clientId: localTillId,
+            closingCash,
+            report,
+          });
+        } catch (e) {
+          console.log("❌ till close sync failed", e);
+        }
+      }
+
+      // 6) print prompt
+      setPrintPromptVisible(true);
+    } catch (e: any) {
+      Alert.alert("Till close failed", e?.message || "Try again.");
+    }
+  }
+
+  async function handlePrintTillReport(shouldPrint: boolean) {
+    setPrintPromptVisible(false);
+    if (!shouldPrint) return;
+
+    try {
+      if (!lastReport) {
+        Alert.alert("No report", "Till report was not generated.");
+        return;
+      }
+      await printTillCloseReport(lastReport);
+      Alert.alert("Printed", "Till report sent to printer.");
+    } catch (e: any) {
+      Alert.alert("Print failed", e?.message || "Try again");
+    }
+  }
 
   /* ------------------------ RENDER ------------------------ */
   return (
@@ -3196,7 +3284,7 @@ useEffect(() => {
 
           <View style={styles.homeMenuCard}>
             {/* 1) OPEN / CLOSE TILL – DYNAMIC */}
-            <Pressable style={styles.homeMenuItem} onPress={handleOpenOrCloseTill}>
+            <Pressable style={styles.homeMenuItem} onPress={() => handleOpenOrCloseTill({ tillOpen, setTillOpen, setHomeMenuVisible, setConfirmCloseVisible })}>
               <MaterialIcons
                 name={tillOpen ? "lock" : "lock-open"}
                 size={20}
@@ -3274,7 +3362,7 @@ useEffect(() => {
               style={styles.homeMenuItem}
               onPress={() => {
                 setHomeMenuVisible(false);
-                navigation.navigate("Home");
+                navigation.navigate("ClockIn");
               }}
             >
               <MaterialIcons
@@ -3292,9 +3380,123 @@ useEffect(() => {
 
         </View>
       </Modal>
+      {/* 1) Confirm Close Till */}
+      <Modal
+        visible={confirmCloseVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setConfirmCloseVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.tillModalCard}>
+            <Text style={styles.tillModalTitle}>Close Till</Text>
+            <Text style={styles.tillModalMsg}>Are you sure you want to close till?</Text>
 
+            <View style={styles.tillModalRow}>
+              <Pressable
+                style={[styles.tillBtn, styles.tillBtnSecondary]}
+                onPress={() => setConfirmCloseVisible(false)}
+              >
+                <Text style={styles.tillBtnTextSecondary}>No</Text>
+              </Pressable>
 
+              <Pressable
+                style={[styles.tillBtn, styles.tillBtnPrimary]}
+                onPress={() => {
+                  setConfirmCloseVisible(false);
+                  setTillCloseAmount("");
+                  setCloseAmountVisible(true);
+                }}
+              >
+                <Text style={styles.tillBtnTextPrimary}>Yes</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
+      {/* 2) Enter Till Amount */}
+      <Modal
+        visible={closeAmountVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setCloseAmountVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.tillAmountCard}>
+            <Text style={styles.tillModalTitle}>Enter Till Amount</Text>
+
+            <View style={styles.tillAmountDisplay}>
+              <Text style={styles.tillAmountText}>{tillCloseAmount || "0.00"}</Text>
+            </View>
+
+            {[
+              ["1", "2", "3"],
+              ["4", "5", "6"],
+              ["7", "8", "9"],
+              ["C", "0"],
+            ].map((row, idx) => (
+              <View key={idx} style={styles.tillKeypadRow}>
+                {row.map((k) => (
+                  <Pressable
+                    key={k}
+                    style={styles.tillKeypadKey}
+                    onPress={() => handleKeypadPress(k)}
+                  >
+                    <Text style={styles.tillKeypadKeyText}>{k}</Text>
+                  </Pressable>
+                ))}
+              </View>
+            ))}
+
+            <Pressable
+              style={styles.tillDoneBtn}
+              onPress={() => {
+                if (!tillCloseAmount) return Alert.alert("Enter till amount");
+                const val = Number(tillCloseAmount);
+                if (Number.isNaN(val)) return Alert.alert("Invalid amount");
+                setCloseAmountVisible(false);
+                actuallyCloseTill(val);
+              }}
+            >
+              <Text style={styles.tillDoneText}>Done</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+
+      {/* 3) Print prompt */}
+      <Modal
+        visible={printPromptVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setPrintPromptVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.tillModalCard}>
+            <Text style={styles.tillModalTitle}>Till Closed Successfully!</Text>
+            <Text style={styles.tillModalMsg}>
+              Would you like to print the till report?
+            </Text>
+
+            <View style={styles.tillModalRow}>
+              <Pressable
+                style={[styles.tillBtn, styles.tillBtnPrimary]}
+                onPress={() => handlePrintTillReport(true)}
+              >
+                <Text style={styles.tillBtnTextPrimary}>Yes</Text>
+              </Pressable>
+
+              <Pressable
+                style={[styles.tillBtn, styles.tillBtnSecondary]}
+                onPress={() => handlePrintTillReport(false)}
+              >
+                <Text style={styles.tillBtnTextSecondary}>No</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -3929,4 +4131,50 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: "#111827",
   },
+  tillModalCard: {
+    width: 360,
+    backgroundColor: "#fff",
+    borderRadius: 16,
+    padding: 20,
+    alignItems: "center",
+  },
+  tillModalTitle: { fontSize: 18, fontWeight: "700", marginBottom: 8, color: "#111827" },
+  tillModalMsg: { fontSize: 14, color: "#4b5563", textAlign: "center", marginBottom: 16 },
+
+  tillModalRow: { flexDirection: "row", width: "100%" },
+  tillBtn: { flex: 1, paddingVertical: 10, borderRadius: 10, alignItems: "center", marginHorizontal: 6 },
+  tillBtnPrimary: { backgroundColor: "#000" },
+  tillBtnSecondary: { backgroundColor: "#e5e7eb" },
+  tillBtnTextPrimary: { color: "#fff", fontWeight: "700" },
+  tillBtnTextSecondary: { color: "#111827", fontWeight: "700" },
+
+  tillAmountCard: {
+    width: 360,
+    backgroundColor: "#fff",
+    borderRadius: 16,
+    padding: 20,
+    alignItems: "center",
+  },
+  tillAmountDisplay: {
+    width: "100%",
+    paddingVertical: 12,
+    borderRadius: 10,
+    backgroundColor: "#f3f4f6",
+    alignItems: "center",
+    marginBottom: 12,
+  },
+  tillAmountText: { fontSize: 22, fontWeight: "800", color: "#111827" },
+  tillKeypadRow: { flexDirection: "row", width: "100%", marginBottom: 8 },
+  tillKeypadKey: {
+    flex: 1,
+    marginHorizontal: 6,
+    paddingVertical: 12,
+    borderRadius: 10,
+    backgroundColor: "#e5e7eb",
+    alignItems: "center",
+  },
+  tillKeypadKeyText: { fontSize: 18, fontWeight: "800", color: "#111827" },
+  tillDoneBtn: { marginTop: 10, paddingVertical: 10, paddingHorizontal: 18 },
+  tillDoneText: { fontSize: 18, fontWeight: "800", color: "#000" },
+
 });

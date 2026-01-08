@@ -29,6 +29,31 @@ export type StoredDevice = {
 export type ReceiptPrintArgs = BuildReceiptArgs;
 export type KitchenPrintArgs = BuildKitchenArgs;
 
+/** ✅ NEW: Till report type (keep it flexible) */
+export type TillCloseReport = {
+  branchName?: string;
+  userName?: string;
+  openedAt?: string;
+  closedAt?: string;
+  openingCash?: number;
+  closingCash?: number;
+
+  totals?: {
+    ordersCount?: number;
+    netSales?: number;
+    taxTotal?: number;
+    discountTotal?: number;
+  };
+
+  payments?: { methodName: string; total: number }[];
+
+  cash?: {
+    cashSales?: number;
+    expectedCash?: number;
+    variance?: number;
+  };
+};
+
 async function loadPrinters(): Promise<StoredDevice[]> {
   try {
     const raw = await AsyncStorage.getItem(STORAGE_KEY);
@@ -108,10 +133,7 @@ function parseCsv(value?: string | null): string[] {
  *  2) Else if printer has categoryFilter -> only those categories
  *  3) Else -> everything
  */
-function itemMatchesPrinterFilters(
-  item: any,
-  printer: StoredDevice
-): boolean {
+function itemMatchesPrinterFilters(item: any, printer: StoredDevice): boolean {
   const productIds = parseCsv(printer.productFilter);
   const categoryIds = parseCsv(printer.categoryFilter);
 
@@ -152,6 +174,85 @@ async function sendToPrinter(printer: StoredDevice, rawText: string) {
 
   // Later: replace with ESC/POS or SDK call, e.g.
   // await EscPosPrinter.printText(printer.ip, rawText);
+}
+
+// ---------- ✅ Till Report Template -----------------
+
+function money(n: any) {
+  const v = Number(n || 0);
+  return v.toFixed(2);
+}
+
+function buildTillCloseReportText(report: TillCloseReport) {
+  const lines: string[] = [];
+
+  lines.push("DWF POS");
+  lines.push("TILL CLOSE REPORT");
+  lines.push("--------------------------------");
+
+  if (report.branchName) lines.push(`Branch: ${report.branchName}`);
+  if (report.userName) lines.push(`Cashier: ${report.userName}`);
+  if (report.openedAt) lines.push(`Opened: ${report.openedAt}`);
+  if (report.closedAt) lines.push(`Closed: ${report.closedAt}`);
+
+  lines.push("--------------------------------");
+
+  const t = report.totals || {};
+  if (t.ordersCount != null) lines.push(`Orders: ${t.ordersCount}`);
+  if (t.netSales != null) lines.push(`Net Sales: ${money(t.netSales)}`);
+  if (t.taxTotal != null) lines.push(`Tax: ${money(t.taxTotal)}`);
+  if (t.discountTotal != null) lines.push(`Discounts: ${money(t.discountTotal)}`);
+
+  lines.push("--------------------------------");
+  lines.push("Payments:");
+
+  const pays = Array.isArray(report.payments) ? report.payments : [];
+  if (!pays.length) {
+    lines.push("  (none)");
+  } else {
+    for (const p of pays) {
+      lines.push(`  ${p.methodName}: ${money(p.total)}`);
+    }
+  }
+
+  lines.push("--------------------------------");
+
+  if (report.openingCash != null)
+    lines.push(`Opening Cash: ${money(report.openingCash)}`);
+
+  const cash = report.cash || {};
+  if (cash.cashSales != null) lines.push(`Cash Sales: ${money(cash.cashSales)}`);
+  if (cash.expectedCash != null)
+    lines.push(`Expected Cash: ${money(cash.expectedCash)}`);
+
+  if (report.closingCash != null)
+    lines.push(`Counted Cash: ${money(report.closingCash)}`);
+
+  if (cash.variance != null) lines.push(`Variance: ${money(cash.variance)}`);
+
+  lines.push("\n\n");
+  return lines.join("\n");
+}
+
+/**
+ * ✅ NEW: Print till close report on Cashier printer (same routing as receipt)
+ */
+export async function printTillCloseReport(report: TillCloseReport) {
+  try {
+    const printers = await loadPrinters();
+    // Till report always goes to Cashier printer, orderType not relevant
+    const printer = chooseReceiptPrinter(printers, null);
+
+    if (!printer) {
+      console.log("⚠️ No cashier printers configured in pos_devices");
+      return;
+    }
+
+    const text = buildTillCloseReportText(report);
+    await sendToPrinter(printer, text);
+  } catch (e) {
+    console.log("printTillCloseReport error", e);
+  }
 }
 
 // ---------- Public APIs --------------------------------
