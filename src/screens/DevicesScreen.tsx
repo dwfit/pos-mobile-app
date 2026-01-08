@@ -7,10 +7,12 @@ import {
   Pressable,
   StyleSheet,
   FlatList,
-  Alert,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { MaterialIcons } from "@expo/vector-icons";
+
+// ✅ Modern dialog
+import ModernDialog from "../components/ModernDialog";
 
 const STORAGE_KEY = "pos_devices";
 
@@ -26,12 +28,12 @@ const DEVICE_TYPES = [
 
 type StoredDevice = {
   id: string;
-  kind: string; // "Printer"
+  kind: string;
   model: string | null;
   typeLabel: string | null;
   name: string;
   ip: string;
-  enabledOrderTypes: string[]; // codes
+  enabledOrderTypes: string[];
 };
 
 type Props = {
@@ -44,7 +46,15 @@ export default function DevicesScreen({ navigation }: Props) {
   const [devices, setDevices] = useState<StoredDevice[]>([]);
   const [loading, setLoading] = useState(false);
 
-  // ==== LOAD DEVICES ON OPEN ======================================
+  // ✅ delete confirm dialog
+  const [deleteDialog, setDeleteDialog] = useState<{
+    visible: boolean;
+    device?: StoredDevice;
+  }>({
+    visible: false,
+  });
+
+  // ==== LOAD DEVICES ======================================
   useEffect(() => {
     loadDevices();
   }, []);
@@ -54,7 +64,7 @@ export default function DevicesScreen({ navigation }: Props) {
       setLoading(true);
       const raw = await AsyncStorage.getItem(STORAGE_KEY);
       const list: StoredDevice[] = raw ? JSON.parse(raw) : [];
-      setDevices(list);
+      setDevices(Array.isArray(list) ? list : []);
     } catch (e) {
       console.log("loadDevices error", e);
     } finally {
@@ -62,7 +72,7 @@ export default function DevicesScreen({ navigation }: Props) {
     }
   }
 
-  // ==== ADD NEW DEVICE ============================================
+  // ==== ADD NEW DEVICE ====================================
   function handleSelectType(label: string) {
     setMenuVisible(false);
 
@@ -74,11 +84,10 @@ export default function DevicesScreen({ navigation }: Props) {
       return;
     }
 
-    // other device types later
     console.log("Selected device type:", label);
   }
 
-  // ==== EDIT EXISTING DEVICE ======================================
+  // ==== EDIT DEVICE =======================================
   function handleEditDevice(device: StoredDevice) {
     navigation.navigate("DeviceInfo", {
       mode: "edit",
@@ -87,61 +96,58 @@ export default function DevicesScreen({ navigation }: Props) {
     });
   }
 
-  // ==== DELETE DEVICE =============================================
-  async function handleDeleteDevice(device: StoredDevice) {
-    Alert.alert(
-      "Delete device",
-      `Remove "${device.name || device.model || device.kind}"?`,
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Delete",
-          style: "destructive",
-          onPress: async () => {
-            try {
-              const raw = await AsyncStorage.getItem(STORAGE_KEY);
-              const list: StoredDevice[] = raw ? JSON.parse(raw) : [];
-              const next = list.filter((d) => d.id !== device.id);
-              await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-              setDevices(next);
-            } catch (e) {
-              console.log("deleteDevice error", e);
-            }
-          },
-        },
-      ]
-    );
+  // ==== DELETE DEVICE (MODERN) ============================
+  function askDeleteDevice(device: StoredDevice) {
+    setDeleteDialog({ visible: true, device });
   }
 
-  // ==== RENDER ROW ================================================
+  async function confirmDeleteDevice() {
+    const device = deleteDialog.device;
+    setDeleteDialog({ visible: false });
+
+    if (!device) return;
+
+    try {
+      const raw = await AsyncStorage.getItem(STORAGE_KEY);
+      const list: StoredDevice[] = raw ? JSON.parse(raw) : [];
+      const next = list.filter((d) => d.id !== device.id);
+      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      setDevices(next);
+    } catch (e) {
+      console.log("deleteDevice error", e);
+    }
+  }
+
+  // ==== RENDER ROW ========================================
   function renderDeviceRow({ item }: { item: StoredDevice }) {
     const title = item.name || item.model || item.kind || "Device";
-    const subtitleParts: string[] = [];
-    if (item.model) subtitleParts.push(item.model);
-    if (item.typeLabel) subtitleParts.push(item.typeLabel);
-    if (item.ip) subtitleParts.push(item.ip);
-    const subtitle = subtitleParts.join(" • ");
+    const subtitle = [item.model, item.typeLabel, item.ip]
+      .filter(Boolean)
+      .join(" • ");
 
     return (
-      <Pressable style={styles.deviceRow} onPress={() => handleEditDevice(item)}>
+      <Pressable
+        style={styles.deviceRow}
+        onPress={() => handleEditDevice(item)}
+      >
         <View>
           <Text style={styles.deviceTitle}>{title}</Text>
-          {!!subtitle && <Text style={styles.deviceSubtitle}>{subtitle}</Text>}
+          {!!subtitle && (
+            <Text style={styles.deviceSubtitle}>{subtitle}</Text>
+          )}
         </View>
 
-        <View style={styles.deviceActions}>
-          <Pressable
-            onPress={() => handleDeleteDevice(item)}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-          >
-            <MaterialIcons name="delete-outline" size={22} color="#ef4444" />
-          </Pressable>
-        </View>
+        <Pressable
+          onPress={() => askDeleteDevice(item)}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+        >
+          <MaterialIcons name="delete-outline" size={22} color="#ef4444" />
+        </Pressable>
       </Pressable>
     );
   }
 
-  // ==== MAIN RENDER ===============================================
+  // ==== MAIN ==============================================
   return (
     <SafeAreaView style={styles.overlay}>
       <View style={styles.card}>
@@ -185,7 +191,9 @@ export default function DevicesScreen({ navigation }: Props) {
               data={devices}
               keyExtractor={(item) => item.id}
               renderItem={renderDeviceRow}
-              ItemSeparatorComponent={() => <View style={styles.separator} />}
+              ItemSeparatorComponent={() => (
+                <View style={styles.separator} />
+              )}
               contentContainerStyle={{ paddingVertical: 4 }}
             />
           )}
@@ -206,6 +214,23 @@ export default function DevicesScreen({ navigation }: Props) {
           </View>
         )}
       </View>
+
+      {/* ✅ Modern delete confirm */}
+      <ModernDialog
+        visible={deleteDialog.visible}
+        tone="error"
+        title="Delete device"
+        message={`Remove "${
+          deleteDialog.device?.name ||
+          deleteDialog.device?.model ||
+          deleteDialog.device?.kind
+        }"?`}
+        secondaryText="Cancel"
+        onSecondary={() => setDeleteDialog({ visible: false })}
+        primaryText="Delete"
+        onPrimary={confirmDeleteDevice}
+        onClose={() => setDeleteDialog({ visible: false })}
+      />
     </SafeAreaView>
   );
 }
@@ -230,32 +255,19 @@ const styles = StyleSheet.create({
     elevation: 10,
   },
   header: {
-    paddingHorizontal: 24,
-    paddingTop: 14,
-    paddingBottom: 10,
+    paddingHorizontal: 16,
+    paddingTop: 30,       
+    paddingBottom: 14,
+    minHeight: 64,        
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
+    backgroundColor: "#f3f4f6",
   },
-  headerLink: {
-    color: "#000000",
-    fontSize: 16,
-    fontWeight: "500",
-  },
-  headerTitle: {
-    fontSize: 18,
-    fontWeight: "600",
-    color: "#111827",
-  },
-  headerRight: {
-    flexDirection: "row",
-    alignItems: "center",
-  },
-  plus: {
-    fontSize: 24,
-    color: "#111827",
-    paddingHorizontal: 4,
-  },
+  headerLink: { color: "#000000", fontSize: 16, fontWeight: "500" },
+  headerTitle: { fontSize: 18, fontWeight: "600", color: "#111827" },
+  headerRight: { flexDirection: "row", alignItems: "center" },
+  plus: { fontSize: 24, color: "#111827", paddingHorizontal: 4 },
   body: {
     flex: 1,
     borderTopWidth: StyleSheet.hairlineWidth,
@@ -278,52 +290,23 @@ const styles = StyleSheet.create({
     elevation: 12,
     minWidth: 240,
   },
-  menuItem: {
-    paddingHorizontal: 18,
-    paddingVertical: 10,
-  },
-  menuItemText: {
-    fontSize: 14,
-    color: "#111827",
-  },
-  emptyState: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-  },
+  menuItem: { paddingHorizontal: 18, paddingVertical: 10 },
+  menuItemText: { fontSize: 14, color: "#111827" },
+  emptyState: { flex: 1, alignItems: "center", justifyContent: "center" },
   emptyTitle: {
     fontSize: 16,
     fontWeight: "600",
     color: "#111827",
     marginBottom: 4,
   },
-  emptyText: {
-    fontSize: 13,
-    color: "#6b7280",
-    textAlign: "center",
-  },
-  separator: {
-    height: StyleSheet.hairlineWidth,
-    backgroundColor: "#e5e7eb",
-  },
+  emptyText: { fontSize: 13, color: "#6b7280", textAlign: "center" },
+  separator: { height: StyleSheet.hairlineWidth, backgroundColor: "#e5e7eb" },
   deviceRow: {
     paddingVertical: 10,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
   },
-  deviceTitle: {
-    fontSize: 15,
-    fontWeight: "500",
-    color: "#111827",
-  },
-  deviceSubtitle: {
-    fontSize: 12,
-    color: "#6b7280",
-    marginTop: 2,
-  },
-  deviceActions: {
-    flexDirection: "row",
-    alignItems: "center",
-  },
+  deviceTitle: { fontSize: 15, fontWeight: "500", color: "#111827" },
+  deviceSubtitle: { fontSize: 12, color: "#6b7280", marginTop: 2 },
 });

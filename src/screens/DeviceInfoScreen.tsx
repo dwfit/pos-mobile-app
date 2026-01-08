@@ -498,7 +498,9 @@ const styles = StyleSheet.create({
 
   header: {
     paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingTop: 30,       
+    paddingBottom: 14,
+    minHeight: 64,        
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
