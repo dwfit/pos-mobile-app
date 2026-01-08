@@ -199,14 +199,14 @@ export default function DeviceInfoScreen({ navigation, route }: Props) {
     subScreen === "MAIN"
       ? "Printer Info"
       : subScreen === "MODEL"
-      ? "Model"
-      : subScreen === "TYPE"
-      ? "Type"
-      : subScreen === "ORDER_TYPES"
-      ? "Enabled order types"
-      : subScreen === "CATEGORY_FILTER"
-      ? "Category filter"
-      : "Product filter";
+        ? "Model"
+        : subScreen === "TYPE"
+          ? "Type"
+          : subScreen === "ORDER_TYPES"
+            ? "Enabled order types"
+            : subScreen === "CATEGORY_FILTER"
+              ? "Category filter"
+              : "Product filter";
 
   const showSave = subScreen === "MAIN";
 
@@ -413,7 +413,7 @@ export default function DeviceInfoScreen({ navigation, route }: Props) {
                 onPress={() => {
                   setTypeLabel(item);
                   setSubScreen("MAIN");
-;
+                  ;
                 }}
               >
                 <Text style={styles.rowLabel}>{item}</Text>
@@ -498,16 +498,26 @@ const styles = StyleSheet.create({
 
   header: {
     paddingHorizontal: 16,
-    paddingTop: 30,       
+    paddingTop: 30,
     paddingBottom: 14,
-    minHeight: 64,        
+    minHeight: 64,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
     backgroundColor: "#f3f4f6",
   },
-  headerLink: { color: "#111827", fontSize: 16, fontWeight: "600" },
-  headerTitle: { color: "#111827", fontSize: 16, fontWeight: "700" },
+  headerLink: {
+    color: "#111827",
+    fontSize: 16,
+    fontWeight: "600",
+    paddingTop: 2,
+  },
+  headerTitle: {
+    color: "#111827",
+    fontSize: 16,
+    fontWeight: "700",
+    paddingTop: 2,
+  },
 
   list: { backgroundColor: "#ffffff" },
   row: {

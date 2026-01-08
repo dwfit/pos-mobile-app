@@ -220,11 +220,10 @@ export default function DevicesScreen({ navigation }: Props) {
         visible={deleteDialog.visible}
         tone="error"
         title="Delete device"
-        message={`Remove "${
-          deleteDialog.device?.name ||
+        message={`Remove "${deleteDialog.device?.name ||
           deleteDialog.device?.model ||
           deleteDialog.device?.kind
-        }"?`}
+          }"?`}
         secondaryText="Cancel"
         onSecondary={() => setDeleteDialog({ visible: false })}
         primaryText="Delete"
@@ -256,9 +255,9 @@ const styles = StyleSheet.create({
   },
   header: {
     paddingHorizontal: 16,
-    paddingTop: 30,       
+    paddingTop: 30,
     paddingBottom: 14,
-    minHeight: 64,        
+    minHeight: 64,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
