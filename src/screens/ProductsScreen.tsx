@@ -14,6 +14,7 @@ import {
   Alert,
 } from 'react-native';
 import { get, post } from '../lib/api';
+import { useAuthStore } from "../store/authStore";
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getDb } from '../database/db'; // SQLite + sync
 import { syncMenu } from '../sync/menuSync';
@@ -29,6 +30,7 @@ import { printReceiptForOrder, printKitchenTicket } from "../printing/printerSer
 import { closeLocalTill, getLocalTillSession, } from "../database/clockLocal";
 import { generateTillCloseReport } from "../reports/tillCloseReport";
 import { printTillCloseReport, type TillCloseReport, } from "../printing/printerService";
+import ModernDialog from "../components/ModernDialog";
 
 type ProductSize = {
   id: string;
@@ -277,7 +279,12 @@ async function handleOpenOrCloseTill(opts: { tillOpen: boolean; setTillOpen: (v:
       ]);
 
       setTillOpen(true);
-      Alert.alert("Till opened", "Till opened successfully.");
+      showDialog({
+        tone: "success",
+        title: "Till opened",
+        message: "Till opened successfully.",
+      });
+      
       setHomeMenuVisible(false);
       return;
     }
@@ -287,7 +294,12 @@ async function handleOpenOrCloseTill(opts: { tillOpen: boolean; setTillOpen: (v:
     setConfirmCloseVisible(true);
   } catch (e: any) {
     console.log("handleOpenOrCloseTill error", e);
-    Alert.alert("Error", e?.message || "Till operation failed.");
+    showDialog({
+      tone: "error",
+      title: "Error",
+      message: e?.message || "Till operation failed.",
+    });
+    
     setHomeMenuVisible(false);
   }
 }
@@ -562,9 +574,6 @@ export default function ProductsScreen({
   const [newCustomerPhone, setNewCustomerPhone] = useState('');
   const [savingCustomer, setSavingCustomer] = useState(false);
 
-  // Permissions
-  const [userPermissions, setUserPermissions] = useState<string[]>([]);
-
   // Price Tiers (shared with CategoryScreen via Zustand)
   const [tierModalVisible, setTierModalVisible] = useState(false);
   const [tierLoading, setTierLoading] = useState(false);
@@ -573,6 +582,12 @@ export default function ProductsScreen({
   const activeTier = usePriceTierStore((s) => s.activeTier);
   const setActiveTier = usePriceTierStore((s) => s.setActiveTier);
   const hydrateTier = usePriceTierStore((s) => s.hydrate);
+  const hasPermission = useAuthStore((s) => s.hasPermission);
+  const canManualPrint =
+  hasPermission("pos.print.receipt") || hasPermission("pos.print.check");
+
+  const canManualKitchen = hasPermission("pos.kitchen.reprint");
+
   //for Home sub-menu
   const [homeMenuVisible, setHomeMenuVisible] = useState(false);
   // Handy alias for cart
@@ -584,6 +599,57 @@ export default function ProductsScreen({
   const [tillCloseAmount, setTillCloseAmount] = useState("");
 
   const [lastReport, setLastReport] = useState<TillCloseReport | null>(null);
+  
+
+const canUseOpenDiscount =
+  hasPermission("pos.discounts.open.apply") ||
+  hasPermission("pos.discount.open.apply") ||
+  hasPermission("APPLY_OPEN_DISCOUNTS");
+
+const canUsePredefinedDiscount =
+  hasPermission("pos.discounts.predefined.apply") ||
+  hasPermission("pos.discount.predefined.apply") ||
+  hasPermission("APPLY_PREDEFINED_DISCOUNTS");
+
+const canUseAnyDiscount = canUseOpenDiscount || canUsePredefinedDiscount;
+
+const [dlg, setDlg] = useState<{
+    visible: boolean;
+    title: string;
+    message?: string;
+    tone?: "success" | "error" | "info";
+    primaryText?: string;
+    secondaryText?: string;
+    onPrimary?: (() => void) | null;
+    onSecondary?: (() => void) | null;
+  }>({
+    visible: false,
+    title: "",
+    message: "",
+    tone: "info",
+    primaryText: "OK",
+    secondaryText: undefined,
+    onPrimary: null,
+    onSecondary: null,
+  });
+  
+  function showDialog(opts: Partial<typeof dlg>) {
+    setDlg((p) => ({
+      ...p,
+      visible: true,
+      title: opts.title ?? p.title,
+      message: opts.message ?? p.message,
+      tone: opts.tone ?? "info",
+      primaryText: opts.primaryText ?? "OK",
+      secondaryText: opts.secondaryText,
+      onPrimary: opts.onPrimary ?? null,
+      onSecondary: opts.onSecondary ?? null,
+    }));
+  }
+  
+  function hideDialog() {
+    setDlg((p) => ({ ...p, visible: false }));
+  }
 
 
   // ✅ Hydrate shared tier store (so tier from CategoryScreen is visible here)
@@ -765,42 +831,6 @@ export default function ProductsScreen({
       }
     })();
   }, [activeTier]);
-
-  /* ------------------------ POS USER PERMISSIONS ------------------------ */
-  useEffect(() => {
-    (async () => {
-      try {
-        const raw = await AsyncStorage.getItem('pos_user');
-        if (!raw) {
-          setUserPermissions([]);
-          return;
-        }
-        const u = JSON.parse(raw);
-        const perms: string[] = Array.isArray(u?.permissions)
-          ? u.permissions
-          : [];
-        setUserPermissions(perms);
-      } catch (e) {
-        console.log('pos_user permissions load error', e);
-        setUserPermissions([]);
-      }
-    })();
-  }, []);
-
-  const hasPermission = (code: string) =>
-    Array.isArray(userPermissions) && userPermissions.includes(code);
-
-  const canUseOpenDiscount =
-    hasPermission('pos.discounts.open.apply') ||
-    hasPermission('pos.discount.open.apply') ||
-    hasPermission('APPLY_OPEN_DISCOUNTS');
-
-  const canUsePredefinedDiscount =
-    hasPermission('pos.discounts.predefined.apply') ||
-    hasPermission('pos.discount.predefined.apply') ||
-    hasPermission('APPLY_PREDEFINED_DISCOUNTS');
-
-  const canUseAnyDiscount = canUseOpenDiscount || canUsePredefinedDiscount;
 
   /* ------------------------ LOAD PRODUCTS ------------------------ */
   useEffect(() => {
@@ -1347,7 +1377,12 @@ export default function ProductsScreen({
       );
     } catch (err) {
       console.log('LOAD CUSTOMERS ERROR', err);
-      Alert.alert('Error', 'Failed to load customers.');
+      showDialog({
+        tone: "error",
+        title: "Error",
+        message: "Failed to load customers.",
+      });
+      
     } finally {
       setCustomerLoading(false);
     }
@@ -1373,7 +1408,12 @@ export default function ProductsScreen({
     const phone = newCustomerPhone.trim();
 
     if (!name || !phone) {
-      Alert.alert('Missing data', 'Name and phone are required.');
+      showDialog({
+        tone: "error",
+        title: "Missing data",
+        message: "Name and phone are required.",
+      });
+      
       return;
     }
 
@@ -1393,12 +1433,17 @@ export default function ProductsScreen({
       console.log('CREATE CUSTOMER ERROR', err);
       const msg = String(err?.message || err);
       if (msg.includes('Customer already exists')) {
-        Alert.alert(
-          'Customer already exists',
-          'A customer with this phone already exists.',
-        );
+        showDialog({
+          tone: "info",
+          title: "Customer already exists",
+          message: "A customer with this phone already exists.",
+        });    
       } else {
-        Alert.alert('Error', 'Failed to create customer.');
+        showDialog({
+          tone: "error",
+          title: "Error",
+          message: "Failed to create customer.",
+        });     
       }
     } finally {
       setSavingCustomer(false);
@@ -1410,13 +1455,21 @@ export default function ProductsScreen({
     if (readOnlyCart) return;
 
     if (!canUseAnyDiscount) {
-      Alert.alert('No permission', 'You are not allowed to apply discounts.');
+      showDialog({
+        tone: "error",
+        title: "No permission",
+        message: "You are not allowed to apply discounts.",
+      });
       return;
     }
 
     const cartItems: CartItem[] = Array.isArray(cart) ? cart : [];
     if (!cartItems.length) {
-      Alert.alert('Empty cart', 'Add items to the order before discount.');
+      showDialog({
+        tone: "info",
+        title: "Empty cart",
+        message: "Add items to the order before discount.",
+      });
       return;
     }
 
@@ -1430,10 +1483,11 @@ export default function ProductsScreen({
 
   function openDiscountInput(mode: 'AMOUNT' | 'PERCENT') {
     if (!canUseOpenDiscount) {
-      Alert.alert(
-        'No permission',
-        'You are not allowed to apply open/manual discounts.',
-      );
+      showDialog({
+        tone: "error",
+        title: "No permission",
+        message: "You are not allowed to apply discounts.",
+      });
       return;
     }
 
@@ -1445,10 +1499,11 @@ export default function ProductsScreen({
 
   function applyDiscountInput() {
     if (!canUseOpenDiscount) {
-      Alert.alert(
-        'No permission',
-        'You are not allowed to apply open/manual discounts.',
-      );
+      showDialog({
+        tone: "error",
+        title: "No permission",
+        message: "You are not allowed to apply open/manual discounts.",
+      });
       setDiscountInputModalVisible(false);
       return;
     }
@@ -1456,7 +1511,11 @@ export default function ProductsScreen({
     if (!discountInputMode) return;
     const raw = parseFloat(discountInputValue || '0');
     if (!raw || raw <= 0) {
-      Alert.alert('Invalid value', 'Please enter a positive value.');
+      showDialog({
+        tone: "error",
+        title: "Invalid value",
+        message: "Please enter a positive value.",
+      });
       return;
     }
 
@@ -1472,10 +1531,11 @@ export default function ProductsScreen({
     if (readOnlyCart) return;
 
     if (!canUsePredefinedDiscount) {
-      Alert.alert(
-        'No permission',
-        'You are not allowed to apply predefined discounts.',
-      );
+      showDialog({
+        tone: "error",
+        title: "No permission",
+        message: "You are not allowed to apply predefined discounts.",
+      });
       return;
     }
 
@@ -1483,15 +1543,20 @@ export default function ProductsScreen({
 
     const cartItems: CartItem[] = Array.isArray(cart) ? cart : [];
     if (!cartItems.length) {
-      Alert.alert('Empty cart', 'Add items to the order before discount.');
+      showDialog({
+        tone: "info",
+        title: "Empty cart",
+        message: "Add items to the order before discount.",
+      });
       return;
     }
 
     if (!applicableDiscounts.length) {
-      Alert.alert(
-        'No discounts',
-        'No predefined discounts are applicable for this branch/cart.',
-      );
+      showDialog({
+        tone: "info",
+        title: "No discounts",
+        message: "No predefined discounts are applicable for this branch/cart.",
+      });
       return;
     }
 
@@ -1501,10 +1566,11 @@ export default function ProductsScreen({
   function applyPredefinedDiscount(cfg: DiscountConfig) {
     const cartItems: CartItem[] = Array.isArray(cart) ? cart : [];
     if (!isDiscountEligibleForCart(cfg, cartItems)) {
-      Alert.alert(
-        'Not applicable',
-        'This discount is not allowed for current items or order type.',
-      );
+      showDialog({
+        tone: "info",
+        title: "Not applicable",
+        message: "This discount is not allowed for current items or order type.",
+      });  
       return;
     }
 
@@ -1608,26 +1674,35 @@ export default function ProductsScreen({
     if (amount > effectiveRemaining) {
       const change = amount - effectiveRemaining;
       if (change > 0.01) {
-        Alert.alert('Change', `Return to customer: ${toMoney(change)}`);
+        showDialog({
+          tone: "info",
+          title: "Change",
+          message: `Return to customer: ${toMoney(change)}`,
+        }); 
       }
     }
   }
 
   function clearPayments() {
     if (!payments.length) return;
-    Alert.alert('Clear payments', 'Remove all added payments?', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Clear', style: 'destructive', onPress: () => setPayments([]) },
-    ]);
+    showDialog({
+      tone: "info",
+      title: "Clear payments",
+      message: "Remove all added payments?",
+      primaryText: "Clear",
+      secondaryText: "Cancel",
+      onPrimary: () => setPayments([]),
+    });    
   }
 
   /* ------------------------ REQUIRED IDS GUARD ------------------------ */
   function ensureBrandAndDevice(): boolean {
     if (!brandId || !deviceId) {
-      Alert.alert(
-        'Device not activated',
-        'Missing brandId/deviceId. Please re-activate this POS device.',
-      );
+      showDialog({
+        tone: "error",
+        title: "Device not activated",
+        message: "deviceId is missing. Please re-activate this POS device.",
+      });   
       return false;
     }
     return true;
@@ -1707,44 +1782,49 @@ export default function ProductsScreen({
       }
 
       // 🔹 Auto-print after successful payment
-      try {
-        await printReceiptForOrder({
-          brandName,
-          branchName,
-          userName,
-          orderNo: orderNoForReceipt,
-          orderType: orderType || null,
-          businessDate: new Date(),
+      // after payment success (server ok + order saved)
+// ✅ Auto-print after successful payment (ALWAYS print both)
+try {
+  await printReceiptForOrder({
+    brandName: brandName || null,
+    branchName: branchName || null,
+    userName: userName || null,
+    orderNo: orderNoForReceipt || activeOrderId || null,
+    orderType: orderType || null,
+    businessDate: new Date(),
 
-          cart: cart as CartItem[],
-          subtotal: subtotalEx,
-          vatAmount,
-          total: netTotal,
-          discountAmount,
-          payments: payments.map((p) => ({
-            methodName: p.methodName,
-            amount: p.amount,
-          })),
-        });
-      } catch (printErr) {
-        console.log('⚠️ printReceiptForOrder error (ignored):', printErr);
-      }
-      //  Auto-print kitchen ticket (for KITCHEN printers)
-      try {
-        await printKitchenTicket({
-          brandName,
-          branchName,
-          userName,
-          orderNo: orderNoForReceipt,
-          orderType: orderType || null,
-          businessDate: new Date(),
-          tableName: null,
-          notes: null,
-          cart: cart as CartItem[],
-        });
-      } catch (kErr) {
-        console.log("⚠️ printKitchenTicket error (ignored):", kErr);
-      }
+    cart: (cart as CartItem[]) as any,
+    subtotal: subtotalEx,
+    vatAmount,
+    total: netTotal,
+    discountAmount,
+    payments: payments.map((p: any) => ({
+      methodName: p.methodName,
+      amount: Number(p.amount),
+    })),
+  } as any);
+} catch (e) {
+  console.log("🧾 auto invoice print failed", e);
+}
+
+try {
+  await printKitchenTicket({
+    brandName: brandName || null,
+    branchName: branchName || null,
+    userName: userName || null,
+    orderNo: orderNoForReceipt || activeOrderId || null,
+    orderType: orderType || null,
+    businessDate: new Date(),
+    tableName: null,
+    notes: null,
+
+    cart: (cart as CartItem[]) as any,
+  } as any);
+} catch (e) {
+  console.log("🍳 auto kitchen print failed", e);
+}
+
+
 
       // 🔁 Reset UI after payment
       setCart([]);
@@ -1854,22 +1934,22 @@ export default function ProductsScreen({
 
   function handleVoidPress() {
     if (readOnlyCart) return;
+  
     const cartItems: CartItem[] = Array.isArray(cart) ? cart : [];
     if (!cartItems.length) return;
-
+  
     if (!ensureBrandAndDevice()) return;
-
-    Alert.alert('Void order', 'Are you sure you want to void this order?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Void',
-        style: 'destructive',
-        onPress: async () => {
-          try {
-            setVoidLoading(true);
-
-            const discountPayload = appliedDiscount
-              ? {
+    showDialog({
+      tone: "error",
+      title: "Void order?",
+      message: "Are you sure you want to void this order? This action cannot be undone.",
+      primaryText: "Void",
+      secondaryText: "Cancel",
+      onPrimary: async () => {
+        try {
+          setVoidLoading(true);
+          const discountPayload = appliedDiscount
+            ? {
                 kind: appliedDiscount.kind,
                 value: appliedDiscount.value,
                 amount: discountAmount,
@@ -1878,65 +1958,79 @@ export default function ProductsScreen({
                 configId: appliedDiscount.id ?? null,
                 scope: appliedDiscount.scope ?? null,
               }
-              : null;
-
-            const payload: any = {
-              brandId,
-              deviceId,
-
-              branchName,
-              userName,
-              status: 'VOID',
-              orderType,
-              vatRate,
-              subtotalEx,
-              vatAmount,
-              total: netTotal,
-              discountAmount,
-              discount: discountPayload,
-              items: cartItems.map((i) => ({
-                productId: i.productId,
-                productName: i.productName,
-                sizeId: i.sizeId,
-                sizeName: i.sizeName,
-                qty: i.qty,
-                unitPrice: i.price,
-                modifiers:
-                  i.modifiers && i.modifiers.length > 0
-                    ? i.modifiers.map((m) => ({
+            : null;
+  
+          const payload: any = {
+            brandId,
+            deviceId,
+  
+            branchName,
+            userName,
+            status: "VOID",
+            orderType,
+            vatRate,
+            subtotalEx,
+            vatAmount,
+            total: netTotal,
+            discountAmount,
+            discount: discountPayload,
+            items: cartItems.map((i) => ({
+              productId: i.productId,
+              productName: i.productName,
+              sizeId: i.sizeId,
+              sizeName: i.sizeName,
+              qty: i.qty,
+              unitPrice: i.price,
+              modifiers:
+                i.modifiers && i.modifiers.length > 0
+                  ? i.modifiers.map((m) => ({
                       modifierItemId: m.itemId,
                       price: m.price,
                       qty: 1,
                     }))
-                    : [],
-              })),
-              payments: [],
-            };
-
-            if (selectedCustomer?.id) {
-              payload.customerId = String(selectedCustomer.id);
-            }
-
-            await post('/pos/orders', payload);
-
-            setCart([]);
-            setPayments([]);
-            setOrderType(null);
-            setActiveOrderId(null);
-            setSelectedCustomer(null);
-            setAppliedDiscount(null);
-
-            await syncOrdersCache();
-          } catch (err: any) {
-            console.log('VOID ORDER ERROR (ProductsScreen)', err);
-            Alert.alert('Error', err?.message || 'Failed to void this order');
-          } finally {
-            setVoidLoading(false);
+                  : [],
+            })),
+            payments: [],
+          };
+  
+          if (selectedCustomer?.id) {
+            payload.customerId = String(selectedCustomer.id);
           }
-        },
+  
+          await post("/pos/orders", payload);
+
+          setCart([]);
+          setPayments([]);
+          setOrderType(null);
+          setActiveOrderId(null);
+          setSelectedCustomer(null);
+          setAppliedDiscount(null);
+  
+          await syncOrdersCache();
+
+          showDialog({
+            tone: "success",
+            title: "Order voided",
+            message: "The order has been voided successfully.",
+            primaryText: "Done",
+          });
+        } catch (err: any) {
+          console.log("VOID ORDER ERROR (ProductsScreen)", err);
+          showDialog({
+            tone: "error",
+            title: "Void failed",
+            message: err?.message || "Failed to void this order.",
+            primaryText: "OK",
+          });
+        } finally {
+          setVoidLoading(false);
+        }
       },
-    ]);
+      onSecondary: () => {
+      },
+    });
   }
+  
 
   const payDisabled =
     paying || netTotal <= 0 || remaining > 0.01 || payments.length === 0;
@@ -1968,7 +2062,12 @@ export default function ProductsScreen({
       setTiers(list);
     } catch (e: any) {
       console.log('loadTiers error (ProductsScreen)', e);
-      Alert.alert('Error', 'Failed to load price tiers.');
+      showDialog({
+        tone: "error",
+        title: "Error",
+        message: "Failed to load price tiers.",
+      });
+      
     } finally {
       setTierLoading(false);
     }
@@ -2032,23 +2131,51 @@ export default function ProductsScreen({
       setTierModalVisible(false);
     } catch (e) {
       console.log('applyTier error (ProductsScreen)', e);
-      Alert.alert('Tier pricing', 'Failed to apply tier pricing');
+      showDialog({
+        tone: "error",
+        title: "Error",
+        message: "Failed to apply tier pricing.",
+      });
     }
   }
 
   async function handlePrintCurrentOrder() {
-    try {
-      const cartItems = cart as any[];
-      if (!Array.isArray(cartItems) || cartItems.length === 0) {
-        console.log("No items in cart to print");
-        return;
-      }
+    if (!canManualPrint) {
+      showDialog({
+        tone: "error",
+        title: "Error",
+        message: "Access denied, No permission to print receipt ",
+      });
+      return;
+    }
 
+    const cartItems = cart as any[];
+    if (!cartItems.length) {
+      showDialog({
+        tone: "error",
+        title: "Error",
+        message: "Add items first.",
+      });
+      return;
+    }
+
+    // ✅ Most printer routing is by orderType (enabledOrderTypes). If missing, nothing will print.
+    if (!orderType) {
+      showDialog({
+        tone: "error",
+        title: "Error",
+        message: "Please select order type first.",
+      });
+      setOrderTypeModalVisible(true);
+      return;
+    }
+
+    try {
       await printReceiptForOrder({
         brandName,
         branchName,
         userName,
-        orderNo: null, // if you have last orderNo in state, pass it here
+        orderNo: activeOrderId || null,
         orderType,
         businessDate: new Date(),
 
@@ -2058,16 +2185,75 @@ export default function ProductsScreen({
         total: netTotal,
         discountAmount,
         payments: payments.map((p: any) => ({
-          methodName: p.methodName || p.methodLabel || p.name || "Payment",
-          amount: Number(p.amount || 0),
+          methodName: p.methodName,
+          amount: Number(p.amount),
         })),
       });
-    } catch (e) {
-      console.log("handlePrintCurrentOrder error", e);
+
+      showDialog({
+        tone: "success",
+        title: "Success",
+        message: "Invoice printed",
+      });
+    } catch (e: any) {
+      console.log("❌ Invoice print error", e);
+      showDialog({
+        tone: "error",
+        title: "Print failed",
+        message: e?.message || "Failed to print invoice.",
+      });
+      
     }
   }
-
-
+  
+  async function handleKitchenManual() {
+    if (!canManualKitchen) {
+      showDialog({
+        tone: "error",
+        title: "Access denied",
+        message: "You don't have permission to print kitchen tickets.",
+      });      
+      return;
+    }
+  
+    const items: CartItem[] = Array.isArray(cart) ? (cart as CartItem[]) : [];
+    if (!items.length) {
+      showDialog({
+        tone: "error",
+        title: "Error",
+        message: "No items , Add items first",
+      });
+      return;
+    }
+  
+    try {
+      await printKitchenTicket({
+        brandName: brandName || null,
+        branchName: branchName || null,
+        userName: userName || null,
+        orderNo: activeOrderId || null,
+        orderType: orderType || null,
+        businessDate: new Date(),
+        tableName: null,
+        notes: null,
+        cart: items as any,
+      } as any);
+  
+      showDialog({
+        tone: "success",
+        title: "Success",
+        message: "Kitchen ticket printed.",
+      });      
+    } catch (e: any) {
+      console.log("Kitchen print error", e);
+      showDialog({
+        tone: "error",
+        title: "Print failed",
+        message: e?.message || "Failed to print kitchen ticket.",
+      });      
+    }
+  }
+  
   const actions: ActionButton[] = [
     {
       label: 'Price Tag',
@@ -2080,10 +2266,15 @@ export default function ProductsScreen({
     },
     {
       label: 'Print',
-      onPress: handlePrintCurrentOrder,   // ✅ use our helper
-      visible: true,
+      onPress: handlePrintCurrentOrder,
+      visible: canManualPrint, 
     },
-    { label: 'Kitchen', onPress: () => console.log('KITCHEN'), visible: true },
+    {
+      label: 'Kitchen',
+      onPress: handleKitchenManual,
+      visible: canManualKitchen, 
+    },
+    
     {
       label: 'Void',
       onPress: handleVoidPress,
@@ -2170,7 +2361,11 @@ export default function ProductsScreen({
       // 6) print prompt
       setPrintPromptVisible(true);
     } catch (e: any) {
-      Alert.alert("Till close failed", e?.message || "Try again.");
+      showDialog({
+        tone: "error",
+        title: "Till close failed",
+        message: e?.message || "Try again.",
+      });      
     }
   }
 
@@ -2180,13 +2375,25 @@ export default function ProductsScreen({
 
     try {
       if (!lastReport) {
-        Alert.alert("No report", "Till report was not generated.");
+        showDialog({
+          tone: "info",
+          title: "No report",
+          message: "Till report was not generated.",
+        });        
         return;
       }
       await printTillCloseReport(lastReport);
-      Alert.alert("Printed", "Till report sent to printer.");
+      showDialog({
+        tone: "success",
+        title: "Success",
+        message: "Till report sent to printer",
+      });
     } catch (e: any) {
-      Alert.alert("Print failed", e?.message || "Try again");
+      showDialog({
+        tone: "error",
+        title: "Print failed",
+        message: e?.message || "Try again",
+      });      
     }
   }
 
@@ -3452,9 +3659,17 @@ export default function ProductsScreen({
             <Pressable
               style={styles.tillDoneBtn}
               onPress={() => {
-                if (!tillCloseAmount) return Alert.alert("Enter till amount");
+                if (!tillCloseAmount) return showDialog({
+                  tone: "info",
+                  title: "Enter till amount",
+                  message: "Please enter the till amount.",
+                });                
                 const val = Number(tillCloseAmount);
-                if (Number.isNaN(val)) return Alert.alert("Invalid amount");
+                if (Number.isNaN(val)) return showDialog({
+                  tone: "error",
+                  title: "Error",
+                  message: "Invalid amount.",
+                });
                 setCloseAmountVisible(false);
                 actuallyCloseTill(val);
               }}
@@ -3497,6 +3712,23 @@ export default function ProductsScreen({
           </View>
         </View>
       </Modal>
+      <ModernDialog
+  visible={dlg.visible}
+  title={dlg.title}
+  message={dlg.message}
+  tone={dlg.tone}
+  primaryText={dlg.primaryText}
+  secondaryText={dlg.secondaryText}
+  onPrimary={() => {
+    dlg.onPrimary?.();
+    hideDialog();
+  }}
+  onSecondary={() => {
+    dlg.onSecondary?.();
+    hideDialog();
+  }}
+  onClose={hideDialog}
+/>
     </SafeAreaView>
   );
 }

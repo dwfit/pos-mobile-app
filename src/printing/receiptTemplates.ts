@@ -205,7 +205,7 @@ export type BuildKitchenArgs = {
 export function buildKitchenTicketText({
   brandName,
   branchName,
-  userName,        // 👈 NEW
+  userName, 
   orderNo,
   orderType,
   businessDate,
@@ -224,7 +224,7 @@ export function buildKitchenTicketText({
   // META
   if (orderNo) lines.push(`Order: ${orderNo}`);
   if (orderType) lines.push(`Type : ${orderType}`);
-  if (userName) lines.push(`User : ${userName}`);  // 👈 print user
+  if (userName) lines.push(`User : ${userName}`);
 
   if (businessDate) {
     const d =
@@ -235,8 +235,8 @@ export function buildKitchenTicketText({
     if (!isNaN(d.getTime())) {
       const dateStr = d.toLocaleDateString();
       const timeStr = d.toLocaleTimeString();
-      lines.push(`Date : ${dateStr}`);             // 👈 full date
-      lines.push(`Time : ${timeStr}`);             // 👈 time
+      lines.push(`Date : ${dateStr}`);             
+      lines.push(`Time : ${timeStr}`);            
     } else {
       // if parsing fails, just show whatever was passed
       lines.push(`Date : ${String(businessDate)}`);

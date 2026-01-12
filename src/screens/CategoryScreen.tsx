@@ -35,7 +35,15 @@ import { useOrderTypeStore } from "../store/orderTypeStore";
 //Tier TIll Close
 import { closeLocalTill, getLocalTillSession, } from "../database/clockLocal";
 import { generateTillCloseReport } from "../reports/tillCloseReport";
-import { printTillCloseReport, type TillCloseReport, } from "../printing/printerService";
+import {
+  printTillCloseReport,
+  type TillCloseReport,
+  printKitchenTicket,
+  printReceiptForOrder,
+} from "../printing/printerService";
+import { useAuthStore } from "../store/authStore";
+import ModernDialog from "../components/ModernDialog";
+
 
 
 type Category = {
@@ -161,9 +169,9 @@ function subscribeOrdersChanged(
   };
 }
 
-/* =========================
-   ✅ Brand ID helper
-   ========================= */
+
+
+/* =========================Brand ID helper========================= */
 
 async function getEffectiveBrandId(): Promise<string | null> {
   try {
@@ -182,9 +190,7 @@ async function getEffectiveBrandId(): Promise<string | null> {
   return null;
 }
 
-/* =========================
-   ✅ DeviceInfo helper
-   ========================= */
+/* =========================DeviceInfo helper========================= */
 async function getDeviceInfo(): Promise<{
   branchId: string | null;
   brandId: string | null;
@@ -325,7 +331,6 @@ async function refreshPriceTiersFromServer(): Promise<PriceTier[]> {
     throw e;
   }
 }
-
 
 function calcLineModifierTotal(mods?: CartModifier[]): number {
   if (!mods || !Array.isArray(mods)) return 0;
@@ -485,6 +490,68 @@ export default function CategoryScreen({
   const [branchId, setBranchId] = useState<string | null>(null);
   const [brandId, setBrandId] = useState<string | null>(null);
   const [deviceId, setDeviceId] = useState<string | null>(null);
+  const [brandName, setBrandName] = useState<string | null>(null);
+
+  const [dlg, setDlg] = useState<{
+    visible: boolean;
+    title: string;
+    message?: string;
+    tone?: "success" | "error" | "info";
+    primaryText?: string;
+    secondaryText?: string;
+    onPrimary?: (() => void) | null;
+    onSecondary?: (() => void) | null;
+  }>({
+    visible: false,
+    title: "",
+    message: "",
+    tone: "info",
+    primaryText: "OK",
+    secondaryText: undefined,
+    onPrimary: null,
+    onSecondary: null,
+  });
+
+  function showDialog(opts: Partial<typeof dlg>) {
+    setDlg((p) => ({
+      ...p,
+      visible: true,
+      title: opts.title ?? p.title,
+      message: opts.message ?? p.message,
+      tone: opts.tone ?? "info",
+      primaryText: opts.primaryText ?? "OK",
+      secondaryText: opts.secondaryText,
+      onPrimary: opts.onPrimary ?? null,
+      onSecondary: opts.onSecondary ?? null,
+    }));
+  }
+
+  function hideDialog() {
+    setDlg((p) => ({ ...p, visible: false }));
+  }
+
+  // 🔁 Load brand name for printing headers
+  useEffect(() => {
+    (async () => {
+      try {
+        const rawBrand = await AsyncStorage.getItem("pos_brand");
+        if (rawBrand) {
+          const b = JSON.parse(rawBrand);
+          setBrandName(b?.name ?? null);
+          return;
+        }
+
+        const rawDev = await AsyncStorage.getItem("deviceInfo");
+        if (rawDev) {
+          const d = JSON.parse(rawDev);
+          setBrandName(d?.brandName ?? d?.brand?.name ?? null);
+        }
+      } catch (e) {
+        console.log("brand load error (CategoryScreen)", e);
+      }
+    })();
+  }, []);
+
   const [vatRate, setVatRate] = useState<number>(15);
   const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([]);
   const orderType = useOrderTypeStore((s) => s.orderType);
@@ -516,18 +583,13 @@ export default function CategoryScreen({
   const [discountInputMode, setDiscountInputMode] = useState<"AMOUNT" | "PERCENT" | null>(null);
   const [discountInputValue, setDiscountInputValue] = useState("");
   const [discountConfigs, setDiscountConfigs] = useState<DiscountConfig[]>([]);
-  const [userPermissions, setUserPermissions] = useState<string[]>([]);
+  const hasPermission = useAuthStore((s) => s.hasPermission);
+  const refreshAuth = useAuthStore((s) => s.refresh);
+
   // 🔐 Permission helpers (must use component state)
-  const hasPermission = (code: string) =>
-    Array.isArray(userPermissions) && userPermissions.includes(code);
-  const canUseOpenDiscount =
-    hasPermission("pos.discounts.open.apply") ||
-    hasPermission("pos.discount.open.apply") ||
-    hasPermission("APPLY_OPEN_DISCOUNTS");
-  const canUsePredefinedDiscount =
-    hasPermission("pos.discounts.predefined.apply") ||
-    hasPermission("pos.discount.predefined.apply") ||
-    hasPermission("APPLY_PREDEFINED_DISCOUNTS");
+
+
+
   const canUseAnyDiscount = canUseOpenDiscount || canUsePredefinedDiscount;
   //for Home sub-menu
   const [homeMenuVisible, setHomeMenuVisible] = useState(false);
@@ -537,6 +599,27 @@ export default function CategoryScreen({
   const [printPromptVisible, setPrintPromptVisible] = useState(false);
   const [tillCloseAmount, setTillCloseAmount] = useState("");
   const [lastReport, setLastReport] = useState<TillCloseReport | null>(null);
+  //  permission flag for access in POS
+  const canUseOpenDiscount =
+    hasPermission("pos.discounts.open.apply") ||
+    hasPermission("pos.discount.open.apply") ||
+    hasPermission("APPLY_OPEN_DISCOUNTS");
+  const canUsePredefinedDiscount =
+    hasPermission("pos.discounts.predefined.apply") ||
+    hasPermission("pos.discount.predefined.apply") ||
+    hasPermission("APPLY_PREDEFINED_DISCOUNTS");
+
+  const canKitchenReprint = hasPermission("pos.kitchen.reprint");
+  const canAccessDevices =
+    hasPermission("pos.devices.manage") ||
+    hasPermission("ACCESS_DEVICES_MANAGEMENT");
+  const canAccessDrawer =
+    hasPermission("pos.drawer.operations") ||
+    hasPermission("DRAWER_OPERATIONS");
+  const canAccessReports =
+    hasPermission("pos.reports.view") ||
+    hasPermission("pos.reports.access") ||
+    hasPermission("ACCESS_REPORTS");
 
   const MENU_ITEMS = [
     {
@@ -551,9 +634,43 @@ export default function CategoryScreen({
     { label: "House Account Payment", icon: "account-balance-wallet" },
     { label: "E-Invoice (ZATCA)", icon: "receipt" },
     { label: "Reports", icon: "bar-chart" },
-    { label: "Devices", icon: "devices" },
+
+    // 🔐 DEVICES (permission protected)
+    ...(canAccessDevices
+      ? [{
+        label: "Devices",
+        icon: "devices",
+        onPress: () => {
+          setHomeMenuVisible(false);
+
+          // 🔐 EXTRA SECURITY GUARD
+          if (!canAccessDevices) {
+            showDialog({
+              tone: "error",
+              title: "Access denied",
+              message: "You don't have permission to access device management.",
+            });
+            return;
+          }
+
+          navigation.navigate("Devices");
+        },
+      },]
+      : []),
+
     { label: "Exit", icon: "logout", danger: true },
   ];
+
+
+  const [syncProgressVisible, setSyncProgressVisible] = useState(false);
+  const [syncStep, setSyncStep] = useState(0);
+  const [syncStatusText, setSyncStatusText] = useState("Preparing…");
+
+  function setSyncStepUI(step: number, text: string) {
+    setSyncStep(step);
+    setSyncStatusText(text);
+  }
+
 
   /* =========================
      ✅ Price Tier UI state
@@ -716,12 +833,15 @@ export default function CategoryScreen({
         const u = JSON.parse(raw);
         const perms: string[] = Array.isArray(u?.permissions) ? u.permissions : [];
         setUserPermissions(perms);
+
+        console.log("✅ Loaded permissions:", perms.length); // debug
       } catch (e) {
         console.log("pos_user permissions load error (CategoryScreen)", e);
         setUserPermissions([]);
       }
     })();
   }, []);
+
 
   useEffect(() => {
     (async () => {
@@ -845,7 +965,7 @@ export default function CategoryScreen({
         setCategories(mappedFresh);
         setFiltered(mappedFresh);
         console.log(
-          "🌐 Categories auto-updated from server:",
+          "🌐 Categories auto-scheduler updated from server:",
           mappedFresh.length
         );
 
@@ -929,15 +1049,21 @@ export default function CategoryScreen({
 
     const items: CartItem[] = Array.isArray(cart) ? (cart as CartItem[]) : [];
     if (!items.length) {
-      Alert.alert("Empty cart", "Add items to the order before discount.");
+      showDialog({
+        tone: "info",
+        title: "Empty cart",
+        message: "Add items to the order before discount.",
+      });
       return;
     }
 
     if (!canUseAnyDiscount) {
-      Alert.alert(
-        "No permission",
-        "You are not allowed to apply discounts."
-      );
+      showDialog({
+        tone: "error",
+        title: "No permission",
+        message: "You are not allowed to apply discounts.",
+      });
+
       return;
     }
 
@@ -948,10 +1074,12 @@ export default function CategoryScreen({
     if (readOnlyCart) return;
 
     if (!canUseOpenDiscount) {
-      Alert.alert(
-        "No permission",
-        "You are not allowed to apply open discounts."
-      );
+      showDialog({
+        tone: "error",
+        title: "No permission",
+        message: "You are not allowed to apply open/manual discounts.",
+      });
+
       return;
     }
 
@@ -967,7 +1095,12 @@ export default function CategoryScreen({
 
     const raw = parseFloat(discountInputValue || "0");
     if (!raw || raw <= 0) {
-      Alert.alert("Invalid value", "Please enter a positive value.");
+      showDialog({
+        tone: "error",
+        title: "Invalid value",
+        message: "Please enter a positive value.",
+      });
+
       return;
     }
 
@@ -988,10 +1121,12 @@ export default function CategoryScreen({
     if (readOnlyCart) return;
 
     if (!canUsePredefinedDiscount) {
-      Alert.alert(
-        "No permission",
-        "You are not allowed to apply predefined discounts."
-      );
+      showDialog({
+        tone: "error",
+        title: "No permission",
+        message: "You are not allowed to apply predefined discounts.",
+      });
+
       return;
     }
 
@@ -999,15 +1134,22 @@ export default function CategoryScreen({
 
     const items: CartItem[] = Array.isArray(cart) ? (cart as CartItem[]) : [];
     if (!items.length) {
-      Alert.alert("Empty cart", "Add items to the order before discount.");
+      showDialog({
+        tone: "info",
+        title: "Empty cart",
+        message: "Add items to the order before discount.",
+      });
+
       return;
     }
 
     if (!applicableDiscounts.length) {
-      Alert.alert(
-        "No discounts",
-        "No predefined discounts are applicable for this branch/cart."
-      );
+      showDialog({
+        tone: "info",
+        title: "No discounts",
+        message: "No predefined discounts are applicable for this branch/cart.",
+      });
+
       return;
     }
 
@@ -1017,10 +1159,11 @@ export default function CategoryScreen({
   function applyPredefinedDiscount(cfg: DiscountConfig) {
     const items: CartItem[] = Array.isArray(cart) ? (cart as CartItem[]) : [];
     if (!isDiscountEligibleForCart(cfg, items)) {
-      Alert.alert(
-        "Not applicable",
-        "This discount is not allowed for current items or order type."
-      );
+      showDialog({
+        tone: "info",
+        title: "Not applicable",
+        message: "This discount is not allowed for current items or order type.",
+      });
       return;
     }
 
@@ -1043,49 +1186,123 @@ export default function CategoryScreen({
     setAppliedDiscount(null);
   }
 
-
-
   /* ------------------------ MANUAL SYNC BUTTON HANDLER ------------------------ */
   async function handleSyncPress() {
     if (!online) {
-      Alert.alert(
-        "Offline",
-        "Cannot sync menu while offline. Please check your internet connection."
-      );
+      showDialog({
+        tone: "error",
+        title: "Offline",
+        message: "Cannot sync while offline. Please check your internet connection.",
+      });
       return;
     }
 
     if (syncing) return;
 
+    const TOTAL_STEPS = 6;
+
     try {
       setSyncing(true);
-      console.log("🔘 Manual syncMenu from CategoryScreen");
+      setSyncProgressVisible(true);
+      setSyncStepUI(0, "Preparing sync…");
+
+      console.log("🔘 FULL MANUAL SYNC STARTED");
+
+      setSyncStepUI(1, "Checking device & brand…");
       const bid = await getEffectiveBrandId();
       if (!bid) {
-        Alert.alert(
-          "Missing brand",
-          "brandId is missing. Please re-activate device."
-        );
+        showDialog({
+          tone: "error",
+          title: "Missing brand",
+          message: "brandId is missing. Please re-activate device.",
+        });
         return;
       }
 
-      await syncMenu({ brandId: bid, forceFull: true, includeInactive: true });
+      /* MENU */
+      setSyncStepUI(2, "Syncing menu (categories/products)…");
+      await syncMenu({
+        brandId: bid,
+        forceFull: true,
+        includeInactive: true,
+      });
 
-      const fresh = await getLocalCategories();
-      const mappedFresh = mapLocalCategories(fresh);
-      setCategories(mappedFresh);
-      setFiltered(mappedFresh);
-      console.log("🌐 Categories after manual sync:", mappedFresh.length);
+      setSyncStepUI(3, "Refreshing categories…");
+      const freshCats = await getLocalCategories();
+      const mappedCats = mapLocalCategories(freshCats);
+      setCategories(mappedCats);
+      setFiltered(mappedCats);
 
+      /* PRICE TIERS */
+      setSyncStepUI(4, "Syncing price tiers…");
+      try {
+        const freshTiers = await refreshPriceTiersFromServer();
+        setTiers(freshTiers);
+      } catch (e) {
+        console.log("Tier sync failed", e);
+      }
+
+      /* DISCOUNTS */
+      setSyncStepUI(4, "Syncing discounts…");
+      try {
+        const list = await get("/discounts");
+        if (Array.isArray(list)) setDiscountConfigs(list);
+      } catch (e) {
+        console.log("Discount sync failed", e);
+      }
+
+      /* POS CONFIG */
+      setSyncStepUI(5, "Syncing POS config (VAT & payments)…");
+      try {
+        const cfg = await get("/pos/config");
+        if (cfg?.vatRate) setVatRate(cfg.vatRate);
+
+        if (Array.isArray(cfg?.paymentMethods)) {
+          setPaymentMethods(
+            cfg.paymentMethods.map((m: any) => ({
+              id: String(m.id),
+              name: String(m.name),
+              code: m.code ?? null,
+            }))
+          );
+        }
+      } catch (e) {
+        console.log("Config sync failed", e);
+      }
+
+      /* USERS */
+      setSyncStepUI(5, "Syncing users & roles…");
+      try {
+        const { branchId } = await getDeviceInfo();
+        if (branchId) {
+          const res = await post("/auth/sync-users", { branchId });
+          console.log("Users synced:", res?.length || 0);
+        }
+      } catch (e) {
+        console.log("Users sync failed", e);
+      }
+
+      /* ORDERS */
+      setSyncStepUI(6, "Syncing orders cache…");
       await syncOrdersCache();
+
+      setSyncStepUI(TOTAL_STEPS, "Finishing…");
+      showDialog({ tone: "success", title: "Sync complete", message: "All data synced successfully ✅" });
+      console.log("✅ FULL SYNC COMPLETED");
     } catch (e) {
-      console.log("MANUAL syncMenu ERR (CategoryScreen)", e);
-      Alert.alert("Sync error", "Failed to sync menu from server.");
+      console.log("MANUAL FULL SYNC ERROR", e);
+      showDialog({
+        tone: "error",
+        title: "Sync error",
+        message: "Failed to sync data.",
+      });
     } finally {
       setSyncing(false);
+      setSyncProgressVisible(false);
+      setSyncStep(0);
+      setSyncStatusText("Preparing…");
     }
   }
-
   /* ------------------------ LOAD POS CONFIG (VAT + Payment Methods) ------------------------ */
   useEffect(() => {
     let mounted = true;
@@ -1361,7 +1578,11 @@ export default function CategoryScreen({
         ]);
 
         setTillOpen(true);
-        Alert.alert("Till opened", "Till opened successfully.");
+        showDialog({
+          tone: "success",
+          title: "Till opened",
+          message: "Till opened successfully.",
+        });
         setHomeMenuVisible(false);
         return;
       }
@@ -1371,14 +1592,15 @@ export default function CategoryScreen({
       setConfirmCloseVisible(true);
     } catch (e: any) {
       console.log("handleOpenOrCloseTill error", e);
-      Alert.alert("Error", e?.message || "Till operation failed.");
+      showDialog({
+        tone: "error",
+        title: "Error",
+        message: e?.message || "Till operation failed.",
+      });
       setHomeMenuVisible(false);
     }
   }
-
-
   /* ------------------------ CUSTOMER HELPERS ------------------------ */
-
   async function fetchCustomers(term: string) {
     try {
       setCustomerLoading(true);
@@ -1396,7 +1618,7 @@ export default function CategoryScreen({
       );
     } catch (err) {
       console.log("LOAD CUSTOMERS ERROR (CategoryScreen)", err);
-      Alert.alert("Error", "Failed to load customers.");
+      showDialog({ tone: "error", title: "Error", message: "Failed to load customers." });
     } finally {
       setCustomerLoading(false);
     }
@@ -1422,7 +1644,11 @@ export default function CategoryScreen({
     const phone = newCustomerPhone.trim();
 
     if (!name || !phone) {
-      Alert.alert("Missing data", "Name and phone are required.");
+      showDialog({
+        tone: "error",
+        title: "Missing data",
+        message: "Name and phone are required.",
+      });
       return;
     }
 
@@ -1442,12 +1668,17 @@ export default function CategoryScreen({
       console.log("CREATE CUSTOMER ERROR (CategoryScreen)", err);
       const msg = String(err?.message || err);
       if (msg.includes("Customer already exists")) {
-        Alert.alert(
-          "Customer already exists",
-          "A customer with this phone already exists."
-        );
+        showDialog({
+          tone: "info",
+          title: "Customer already exists",
+          message: "A customer with this phone already exists.",
+        });
       } else {
-        Alert.alert("Error", "Failed to create customer.");
+        showDialog({
+          tone: "error",
+          title: "Error",
+          message: "Failed to create customer.",
+        });
       }
     } finally {
       setSavingCustomer(false);
@@ -1532,7 +1763,11 @@ export default function CategoryScreen({
       setTierModalVisible(false);
     } catch (e: any) {
       console.log("applyTier error", e);
-      Alert.alert("Tier pricing", e?.message || "Failed to apply tier pricing");
+      showDialog({
+        tone: "error",
+        title: "Tier pricing",
+        message: e?.message || "Failed to apply tier pricing",
+      });
     }
   }
 
@@ -1580,16 +1815,24 @@ export default function CategoryScreen({
     if (amount > effectiveRemaining) {
       const change = amount - effectiveRemaining;
       if (change > 0.01)
-        Alert.alert("Change", `Return to customer: ${toMoney(change)}`);
+        showDialog({
+          tone: "info",
+          title: "Change",
+          message: `Return to customer: ${toMoney(change)}`,
+        });
     }
   }
 
   function clearPayments() {
     if (!payments.length) return;
-    Alert.alert("Clear payments", "Remove all added payments?", [
-      { text: "Cancel", style: "cancel" },
-      { text: "Clear", style: "destructive", onPress: () => setPayments([]) },
-    ]);
+    showDialog({
+      tone: "info",
+      title: "Clear payments",
+      message: "Remove all added payments?",
+      primaryText: "Clear",
+      secondaryText: "Cancel",
+      onPrimary: () => setPayments([]),
+    });
   }
 
   async function handlePay() {
@@ -1622,10 +1865,11 @@ export default function CategoryScreen({
       }
 
       if (!finalDeviceId) {
-        Alert.alert(
-          "Device not activated",
-          "deviceId is missing. Please re-activate this POS device."
-        );
+        showDialog({
+          tone: "error",
+          title: "Device not activated",
+          message: "deviceId is missing. Please re-activate this POS device.",
+        });
         return;
       }
 
@@ -1633,12 +1877,14 @@ export default function CategoryScreen({
         deviceId: finalDeviceId,
         branchId: finalBranchId || undefined,
         brandId: finalBrandId || undefined,
+        brandName: brandName || "",   // from route/store/storage
+        branchName: branchName || "", // from route/store/storage
         vatRate,
         subtotalEx,
         vatAmount,
         total: cartTotal,
         orderType,
-        priceTierId: activeTier?.id ?? null, // ✅ store which tier used (optional but useful)
+        priceTierId: activeTier?.id ?? null,
         items: cartItems.map((i) => ({
           productId: i.productId,
           productName: i.productName,
@@ -1655,8 +1901,10 @@ export default function CategoryScreen({
               }))
               : [],
         })),
+
         payments,
       };
+
 
       if (selectedCustomer?.id)
         basePayload.customerId = String(selectedCustomer.id);
@@ -1765,10 +2013,11 @@ export default function CategoryScreen({
       }
 
       if (!finalDeviceId) {
-        Alert.alert(
-          "Device not activated",
-          "deviceId is missing. Please re-activate this POS device."
-        );
+        showDialog({
+          tone: "error",
+          title: "Device not activated",
+          message: "deviceId is missing. Please re-activate this POS device.",
+        });
         return;
       }
 
@@ -1844,125 +2093,255 @@ export default function CategoryScreen({
   }
 
   /* ------------------------ VOID ORDER FROM CATEGORY ------------------------ */
+  async function voidOrderNow(items: CartItem[]) {
+    try {
+      setVoidLoading(true);
+
+      let finalBrandId = brandId;
+      let finalBranchId = branchId;
+      let finalDeviceId = deviceId;
+
+      if (!finalBrandId || !finalBranchId || !finalDeviceId) {
+        const info = await getDeviceInfo();
+        if (!finalBrandId && info.brandId) {
+          finalBrandId = info.brandId;
+          setBrandId(info.brandId);
+        }
+        if (!finalBranchId && info.branchId) {
+          finalBranchId = info.branchId;
+          setBranchId(info.branchId);
+        }
+        if (!finalDeviceId && info.deviceId) {
+          finalDeviceId = info.deviceId;
+          setDeviceId(info.deviceId);
+        }
+      }
+
+      if (!finalDeviceId) {
+        showDialog({
+          tone: "error",
+          title: "Device not activated",
+          message: "deviceId is missing. Please re-activate this POS device.",
+        });
+        return;
+      }
+
+      const payload: any = {
+        deviceId: finalDeviceId,
+        branchId: finalBranchId || undefined,
+        brandId: finalBrandId || undefined,
+        branchName,
+        userName,
+        status: "VOID",
+        orderType,
+        vatRate,
+        subtotalEx,
+        vatAmount,
+        total: cartTotal,
+        priceTierId: activeTier?.id ?? null,
+        items: items.map((i) => ({
+          productId: i.productId,
+          productName: i.productName,
+          sizeId: i.sizeId,
+          sizeName: i.sizeName,
+          qty: i.qty,
+          unitPrice: i.price,
+          modifiers:
+            i.modifiers && i.modifiers.length > 0
+              ? i.modifiers.map((m) => ({
+                modifierItemId: m.itemId,
+                price: m.price,
+                qty: 1,
+              }))
+              : [],
+        })),
+        payments: [],
+        ...(selectedCustomer?.id ? { customerId: selectedCustomer.id } : {}),
+      };
+
+      if (discountAmount > 0 && appliedDiscount) {
+        payload.discountAmount = discountAmount;
+        payload.discount = {
+          kind: appliedDiscount.kind,
+          value: appliedDiscount.value,
+          amount: discountAmount,
+          source: appliedDiscount.source ?? null,
+          name: appliedDiscount.name || appliedDiscount.label || null,
+          configId: appliedDiscount.id ?? null,
+          scope: "ORDER",
+        };
+      } else {
+        payload.discountAmount = 0;
+        payload.discount = null;
+      }
+
+      await post("/pos/orders", payload);
+
+      setCart([]);
+      setPayments([]);
+      setOrderType(null);
+      setActiveOrderId?.(null);
+      setSelectedCustomer(null);
+
+      await AsyncStorage.removeItem(DISCOUNT_STORAGE_KEY);
+      setAppliedDiscount(null);
+      setDiscountValue("0");
+
+      await syncOrdersCache();
+    } catch (err: any) {
+      console.log("VOID ORDER ERROR (CategoryScreen)", err);
+      showDialog({
+        tone: "error",
+        title: "Error",
+        message: err?.message || "Failed to void this order",
+      });
+    } finally {
+      setVoidLoading(false);
+    }
+  }
+
   function handleVoidPress() {
     const items: CartItem[] = Array.isArray(cart) ? cart : [];
-    if (!items.length) return;
+    if (!items.length) {
+      showDialog({
+        tone: "info",
+        title: "No items",
+        message: "Add items first.",
+      });
+      return;
+    }
 
-    Alert.alert("Void order", "Are you sure you want to void this order?", [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Void",
-        style: "destructive",
-        onPress: async () => {
-          try {
-            setVoidLoading(true);
-
-            let finalBrandId = brandId;
-            let finalBranchId = branchId;
-            let finalDeviceId = deviceId;
-
-            if (!finalBrandId || !finalBranchId || !finalDeviceId) {
-              const info = await getDeviceInfo();
-              if (!finalBrandId && info.brandId) {
-                finalBrandId = info.brandId;
-                setBrandId(info.brandId);
-              }
-              if (!finalBranchId && info.branchId) {
-                finalBranchId = info.branchId;
-                setBranchId(info.branchId);
-              }
-              if (!finalDeviceId && info.deviceId) {
-                finalDeviceId = info.deviceId;
-                setDeviceId(info.deviceId);
-              }
-            }
-
-            if (!finalDeviceId) {
-              Alert.alert(
-                "Device not activated",
-                "deviceId is missing. Please re-activate this POS device."
-              );
-              return;
-            }
-
-            const payload: any = {
-              deviceId: finalDeviceId,
-              branchId: finalBranchId || undefined,
-              brandId: finalBrandId || undefined,
-              branchName,
-              userName,
-              status: "VOID",
-              orderType,
-              vatRate,
-              subtotalEx,
-              vatAmount,
-              total: cartTotal,
-              priceTierId: activeTier?.id ?? null, // ✅ tier info
-              items: items.map((i) => ({
-                productId: i.productId,
-                productName: i.productName,
-                sizeId: i.sizeId,
-                sizeName: i.sizeName,
-                qty: i.qty,
-                unitPrice: i.price,
-                modifiers:
-                  i.modifiers && i.modifiers.length > 0
-                    ? i.modifiers.map((m) => ({
-                      modifierItemId: m.itemId,
-                      price: m.price,
-                      qty: 1,
-                    }))
-                    : [],
-              })),
-              payments: [],
-              ...(selectedCustomer?.id ? { customerId: selectedCustomer.id } : {}),
-            };
-
-            if (discountAmount > 0 && appliedDiscount) {
-              payload.discountAmount = discountAmount;
-              payload.discount = {
-                kind: appliedDiscount.kind,
-                value: appliedDiscount.value,
-                amount: discountAmount,
-                source: appliedDiscount.source ?? null,
-                name:
-                  appliedDiscount.name ||
-                  appliedDiscount.label ||
-                  null,
-                configId: appliedDiscount.id ?? null,
-                scope: "ORDER",
-              };
-            } else {
-              payload.discountAmount = 0;
-              payload.discount = null;
-            }
-
-            await post("/pos/orders", payload);
-
-            setCart([]);
-            setPayments([]);
-            setOrderType(null);
-            setActiveOrderId?.(null);
-            setSelectedCustomer(null);
-
-            await AsyncStorage.removeItem(DISCOUNT_STORAGE_KEY);
-            setAppliedDiscount(null);
-            setDiscountValue("0");
-
-            await syncOrdersCache();
-          } catch (err: any) {
-            console.log("VOID ORDER ERROR (CategoryScreen)", err);
-            Alert.alert(
-              "Error",
-              err?.message || "Failed to void this order"
-            );
-          } finally {
-            setVoidLoading(false);
-          }
-        },
-      },
-    ]);
+    showDialog({
+      tone: "error",
+      title: "Void order",
+      message: "Are you sure you want to void this order?",
+      primaryText: "Void",
+      secondaryText: "Cancel",
+      onPrimary: () => voidOrderNow(items),
+    });
   }
+
+  /* ------------------------ KITCHEN + INVOICE PRINT ------------------------ */
+  async function handleKitchenPress() {
+    console.log("🍳 Kitchen pressed");
+
+    const items: CartItem[] = Array.isArray(cart) ? (cart as CartItem[]) : [];
+    if (!items.length) {
+      showDialog({
+        tone: "info",
+        title: "No items",
+        message: "Add items first.",
+      });
+      return;
+    }
+
+    const canKitchen = hasPermission("pos.kitchen.reprint");
+
+    if (!canKitchen) {
+      showDialog({
+        tone: "error",
+        title: "Access denied",
+        message: "You don't have permission to print kitchen tickets.",
+      });
+      return;
+    }
+
+    try {
+      await printKitchenTicket({
+        brandName: brandName || null,
+        branchName: branchName || null,
+        userName: userName || null,
+        orderNo: activeOrderId || null,
+        orderType: orderType || null,
+        businessDate: new Date(),
+        tableName: null,
+        notes: null,
+        cart: items as any,
+      } as any);
+
+      showDialog({
+        tone: "success",
+        title: "Success",
+        message: "Kitchen ticket printed.",
+      });
+    } catch (e: any) {
+      console.log("❌ Kitchen print error", e);
+      showDialog({
+        tone: "error",
+        title: "Print failed",
+        message: e?.message || "Failed to print.",
+      });
+    }
+  }
+
+  async function handlePrintPress() {
+    console.log("🧾 Print pressed");
+
+    const items: CartItem[] = Array.isArray(cart) ? (cart as CartItem[]) : [];
+    if (!items.length) {
+      showDialog({
+        tone: "info",
+        title: "No items",
+        message: "Add items first.",
+      });
+      return;
+    }
+
+    const canPrint =
+      hasPermission("pos.print.receipt") || hasPermission("pos.print.check");
+
+    if (!canPrint) {
+      showDialog({
+        tone: "error",
+        title: "Access denied",
+        message: "You don't have permission to print.",
+      });
+      return;
+    }
+
+    // Most receipt printers are filtered by enabledOrderTypes → require orderType
+    if (!orderType) {
+      showDialog({
+        tone: "info",
+        title: "Order type required",
+        message: "Please select order type first.",
+      });
+      setOrderTypeModalVisible(true);
+      return;
+    }
+
+    try {
+      await printReceiptForOrder({
+        brandName: brandName || null,
+        branchName: branchName || null,
+        userName: userName || null,
+        orderNo: activeOrderId || null,
+        orderType: orderType || null,
+        businessDate: new Date(),
+
+        cart: items as any,
+        subtotal: subtotalEx,
+        vatAmount,
+        total: cartTotal,
+        discountAmount,
+        payments: [],
+      } as any);
+
+      showDialog({
+        tone: "success",
+        title: "Success",
+        message: "Invoice printed.",
+      });
+    } catch (e: any) {
+      console.log("❌ Invoice print error", e);
+      showDialog({
+        tone: "error",
+        title: "Print failed",
+        message: e?.message || "Failed to print invoice.",
+      });
+    }
+  }
+
 
   const payDisabled =
     paying || cartTotal <= 0 || remaining > 0.01 || payments.length === 0;
@@ -2036,7 +2415,11 @@ export default function CategoryScreen({
       // 6) print prompt
       setPrintPromptVisible(true);
     } catch (e: any) {
-      Alert.alert("Till close failed", e?.message || "Try again.");
+      showDialog({
+        tone: "error",
+        title: "Till close failed",
+        message: e?.message || "Try again.",
+      });
     }
   }
 
@@ -2046,13 +2429,25 @@ export default function CategoryScreen({
 
     try {
       if (!lastReport) {
-        Alert.alert("No report", "Till report was not generated.");
+        showDialog({
+          tone: "info",
+          title: "No report",
+          message: "Till report was not generated.",
+        });
         return;
       }
       await printTillCloseReport(lastReport);
-      Alert.alert("Printed", "Till report sent to printer.");
+      showDialog({
+        tone: "success",
+        title: "Printed",
+        message: "Till report sent to printer.",
+      });
     } catch (e: any) {
-      Alert.alert("Print failed", e?.message || "Try again");
+      showDialog({
+        tone: "error",
+        title: "Print failed",
+        message: e?.message || "Try again",
+      });
     }
   }
   /* ------------------------ RENDER ------------------------ */
@@ -2265,34 +2660,40 @@ export default function CategoryScreen({
         {/* RIGHT – Actions + search + categories */}
         <View style={styles.rightPanel}>
           <View style={styles.actionRow}>
-            {[
-              "Price Tag",
-              "Print",
-              "Kitchen",
-              "Void",
-              "Discount",
-              "Notes",
-              "Tags",
-              "Sync",
-              "More",
-            ].map((label) => {
+            {["Price Tag", "Print", "Kitchen", "Void", "Discount", "Notes", "Tags", "Sync", "More"].map((label) => {
               const isVoid = label === "Void";
               const isSync = label === "Sync";
               const isTier = label === "Price Tag";
               const isDiscount = label === "Discount";
+              const isPrint = label === "Print";
+              const isKitchen = label === "Kitchen";
 
               let onPress: () => void | Promise<void> = () =>
                 console.log(label.toUpperCase(), "pressed");
 
-              if (isVoid) onPress = handleVoidPress;
-              else if (isSync) onPress = handleSyncPress;
-              else if (isTier) onPress = openTierModal;
-              else if (isDiscount) onPress = openDiscountMenu; // 👈 your discount modal opener
+              //  IMPORTANT: keep braces
+              if (isVoid) {
+                onPress = handleVoidPress;
+              } else if (isSync) {
+                onPress = handleSyncPress;
+              } else if (isTier) {
+                onPress = openTierModal;
+              } else if (isDiscount) {
+                onPress = openDiscountMenu;
+              } else if (isPrint) {
+                onPress = handlePrintPress;
+              } else if (isKitchen) {
+                onPress = handleKitchenPress;
+              }
 
               const disabled =
                 (isVoid && voidLoading) ||
                 (isSync && syncing) ||
-                (isDiscount && (readOnlyCart || !canUseAnyDiscount)); // optional permission check
+                (isDiscount && (readOnlyCart || !canUseAnyDiscount)) ||
+                (isKitchen && !hasPermission("pos.kitchen.reprint")) ||
+                (isPrint &&
+                  !(hasPermission("pos.print.receipt") ||
+                    hasPermission("pos.print.check")));
 
               return (
                 <Pressable
@@ -2306,15 +2707,13 @@ export default function CategoryScreen({
                   disabled={disabled}
                 >
                   <Text style={styles.actionText}>
-                    {isVoid && voidLoading
-                      ? "VOID…"
-                      : isSync && syncing
-                        ? "SYNC…"
-                        : label.toUpperCase()}
+                    {isVoid && voidLoading ? "VOID…" : isSync && syncing ? "SYNC…" : label.toUpperCase()}
                   </Text>
                 </Pressable>
               );
             })}
+
+
           </View>
 
 
@@ -2730,10 +3129,11 @@ export default function CategoryScreen({
                           customAmountInput || "0"
                         );
                         if (!val || val <= 0) {
-                          Alert.alert(
-                            "Invalid amount",
-                            "Please enter a valid amount."
-                          );
+                          showDialog({
+                            tone: "error",
+                            title: "Invalid amount",
+                            message: "Please enter a valid amount.",
+                          });
                           return;
                         }
                         completePayment(val);
@@ -3104,14 +3504,31 @@ export default function CategoryScreen({
               </Text>
             </Pressable>
 
-            {/* 2) Drawer Ops */}
-            <Pressable style={styles.homeMenuItem} onPress={() => { }}>
-              <MaterialIcons
-                name="inbox"
-                size={20}
-                color="#111827"
-                style={{ marginRight: 10 }}
-              />
+            {/* Drawer Operations */}
+            <Pressable
+              style={styles.homeMenuItem}
+              onPress={async () => {
+                setHomeMenuVisible(false);
+
+                try { await refreshAuth?.(); } catch { }
+
+                const ok =
+                  hasPermission("pos.drawer.operations") ||
+                  hasPermission("DRAWER_OPERATIONS");
+
+                if (!ok) {
+                  showDialog({
+                    tone: "error",
+                    title: "Access denied",
+                    message: "You don't have permission to access drawer operations.",
+                  });
+                  return;
+                }
+
+                navigation.navigate("DrawerOperations");
+              }}
+            >
+              <MaterialIcons name="inbox" size={20} color="#111827" style={{ marginRight: 10 }} />
               <Text style={styles.homeMenuItemText}>Drawer Operations</Text>
             </Pressable>
 
@@ -3137,22 +3554,57 @@ export default function CategoryScreen({
               <Text style={styles.homeMenuItemText}>E-Invoice (ZATCA)</Text>
             </Pressable>
 
-            {/* 5) Reports */}
-            <Pressable style={styles.homeMenuItem} onPress={() => { }}>
-              <MaterialIcons
-                name="bar-chart"
-                size={20}
-                color="#111827"
-                style={{ marginRight: 10 }}
-              />
+            {/* Reports */}
+            <Pressable
+              style={styles.homeMenuItem}
+              onPress={async () => {
+                setHomeMenuVisible(false);
+
+                try { await refreshAuth?.(); } catch { }
+
+                const ok =
+                  hasPermission("pos.reports.view") ||
+                  hasPermission("pos.reports.access") ||
+                  hasPermission("ACCESS_REPORTS");
+
+                if (!ok) {
+                  showDialog({
+                    tone: "error",
+                    title: "Access denied",
+                    message: "You don't have permission to access reports.",
+                  });
+                  return;
+                }
+
+                navigation.navigate("Reports");
+              }}
+            >
+              <MaterialIcons name="bar-chart" size={20} color="#111827" style={{ marginRight: 10 }} />
               <Text style={styles.homeMenuItemText}>Reports</Text>
             </Pressable>
 
             {/* 6) Devices */}
             <Pressable
               style={styles.homeMenuItem}
-              onPress={() => {
+              onPress={async () => {
                 setHomeMenuVisible(false);
+                try {
+                  await refreshAuth();
+                } catch { }
+
+                const canAccessDevices =
+                  hasPermission("pos.devices.manage") ||
+                  hasPermission("ACCESS_DEVICES_MANAGEMENT");
+
+                if (!canAccessDevices) {
+                  showDialog({
+                    tone: "error",
+                    title: "Access denied",
+                    message: "You don't have permission to access device management.",
+                  });
+                  return;
+                }
+
                 navigation.navigate("Devices");
               }}
             >
@@ -3261,9 +3713,17 @@ export default function CategoryScreen({
             <Pressable
               style={styles.tillDoneBtn}
               onPress={() => {
-                if (!tillCloseAmount) return Alert.alert("Enter till amount");
+                if (!tillCloseAmount) return showDialog({
+                  tone: "info",
+                  title: "Enter till amount",
+                  message: "Please enter the till amount.",
+                });
                 const val = Number(tillCloseAmount);
-                if (Number.isNaN(val)) return Alert.alert("Invalid amount");
+                if (Number.isNaN(val)) return showDialog({
+                  tone: "error",
+                  title: "Invalid amount",
+                  message: "Please enter a valid amount.",
+                });
                 setCloseAmountVisible(false);
                 actuallyCloseTill(val);
               }}
@@ -3306,6 +3766,47 @@ export default function CategoryScreen({
           </View>
         </View>
       </Modal>
+      <Modal visible={syncProgressVisible} transparent animationType="fade">
+        <View style={styles.syncOverlay}>
+          <View style={styles.syncCard}>
+            <View style={styles.syncHeaderRow}>
+              <Text style={styles.syncTitle}>Syncing…</Text>
+              <Text style={styles.syncStepText}>{syncStep}/5</Text>
+            </View>
+
+            <View style={{ marginTop: 10 }}>
+              <ActivityIndicator size="large" />
+              <Text style={styles.syncStatus}>{syncStatusText}</Text>
+            </View>
+
+            <View style={styles.syncHintBox}>
+              <Text style={styles.syncHint}>
+                Please don’t close the app while syncing.
+              </Text>
+            </View>
+          </View>
+        </View>
+      </Modal>
+      <ModernDialog
+        visible={dlg.visible}
+        tone={dlg.tone}
+        title={dlg.title}
+        message={dlg.message}
+        primaryText={dlg.primaryText}
+        secondaryText={dlg.secondaryText}
+        onPrimary={() => {
+          const fn = dlg.onPrimary;
+          hideDialog();
+          fn?.();
+        }}
+        onSecondary={() => {
+          const fn = dlg.onSecondary;
+          hideDialog();
+          fn?.();
+        }}
+        onClose={hideDialog}
+      />
+
 
     </SafeAreaView>
   );
@@ -3876,7 +4377,57 @@ const styles = StyleSheet.create({
   tillKeypadKeyText: { fontSize: 18, fontWeight: "800", color: "#111827" },
   tillDoneBtn: { marginTop: 10, paddingVertical: 10, paddingHorizontal: 18 },
   tillDoneText: { fontSize: 18, fontWeight: "800", color: "#000" },
-
-
-
+  syncOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.35)",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 16,
+  },
+  syncCard: {
+    width: "100%",
+    maxWidth: 420,
+    backgroundColor: "#fff",
+    borderRadius: 18,
+    padding: 18,
+    shadowColor: "#000",
+    shadowOpacity: 0.12,
+    shadowRadius: 18,
+    elevation: 6,
+  },
+  syncHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  syncTitle: {
+    fontSize: 18,
+    fontWeight: "800",
+    color: "#111827",
+  },
+  syncStepText: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: "#6b7280",
+  },
+  syncStatus: {
+    marginTop: 12,
+    textAlign: "center",
+    fontSize: 14,
+    fontWeight: "700",
+    color: "#111827",
+  },
+  syncHintBox: {
+    marginTop: 14,
+    backgroundColor: "#f3f4f6",
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+  },
+  syncHint: {
+    textAlign: "center",
+    color: "#374151",
+    fontSize: 12,
+    fontWeight: "600",
+  },
 });

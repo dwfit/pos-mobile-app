@@ -15,6 +15,7 @@ import { MaterialIcons } from "@expo/vector-icons";
 // ✅ correct paths
 import { getLocalCategories } from "../database/menu";
 import { getDb } from "../database/db";
+import ModernDialog from "../components/ModernDialog";
 
 const STORAGE_KEY = "pos_devices";
 
@@ -98,6 +99,7 @@ export default function DeviceInfoScreen({ navigation, route }: Props) {
 
   const [selectedCategoryIds, setSelectedCategoryIds] = useState<string[]>([]);
   const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
+
 
   // Load menu from local DB
   useEffect(() => {

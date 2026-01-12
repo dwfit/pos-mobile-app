@@ -333,14 +333,19 @@ export default function ClockInScreen({ navigation, route }: Props) {
     navigation.replace("Category", { branchName, userName });
   }
 
-  function handleExit() {
-    AsyncStorage.multiRemove([
-      "pos_clocked_in",
-      "pos_till_opened",
-      "pos_shift_id",
-      "pos_till_session_id",
-    ]).finally(() => navigation.replace("Home"));
+  async function handleExit() {
+    await AsyncStorage.multiRemove([
+      "pos_user",
+      "token",
+      "accessToken",
+      "refreshToken",
+      "pos_permissions",
+    ]);
+  
+    navigation.replace("Home");
   }
+  
+  
 
   async function handlePrintTillReport(shouldPrint: boolean) {
     setPrintPromptVisible(false);

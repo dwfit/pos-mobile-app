@@ -1,17 +1,20 @@
 // App.tsx
 import "react-native-gesture-handler";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { AppState } from "react-native";
 
-// ✅ SQLite init
+//  SQLite init
 import { initDatabase } from "./src/database/db";
 
-// ✅ Online/offline monitor
+//  Online/offline monitor
 import NetInfo from "@react-native-community/netinfo";
 
 // STORAGE
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { syncClockAndTill } from "./src/sync/clockSync";
+
+//  Permissions (professional: single global store)
+import { useAuthStore } from "./src/store/authStore";
 
 // SCREENS
 import ActivateScreen from "./src/screens/ActivateScreen";
@@ -136,7 +139,36 @@ export default function App() {
     }
   }
 
-  // Load initial value from storage on app start
+  // =======================================================
+  //  ✅ Helper: refresh user/permissions immediately (ONLINE)
+  // =======================================================
+  // Goal: if admin updates role/permissions while device is online,
+  // app pulls /auth/me quickly and updates UI without relogin.
+  const authRefreshInFlightRef = useRef<Promise<void> | null>(null);
+
+  async function refreshAuthNow(reason: string) {
+    try {
+      // Only when online (avoid noisy errors offline)
+      if (!online) return;
+
+      // de-dupe concurrent calls
+      if (!authRefreshInFlightRef.current) {
+        authRefreshInFlightRef.current = (async () => {
+          try {
+            await useAuthStore.getState().refresh(); // should call GET /auth/me
+          } finally {
+            authRefreshInFlightRef.current = null;
+          }
+        })();
+      }
+      await authRefreshInFlightRef.current;
+    } catch (e) {
+      // If refresh fails due to revoke, your api.ts interceptor should logout/clear.
+      console.log("refreshAuthNow failed:", reason, e);
+    }
+  }
+
+  // Load initial till value from storage on app start
   useEffect(() => {
     refreshTillFlag();
   }, []);
@@ -165,6 +197,14 @@ export default function App() {
   // =======================================================
   useEffect(() => {
     (async () => {
+      // 0) ✅ Hydrate auth/permissions once (professional approach)
+      // This loads pos_user permissions into global store (offline-friendly)
+      try {
+        await useAuthStore.getState().hydrate();
+      } catch (e) {
+        console.log("authStore.hydrate error", e);
+      }
+
       // 1) Initialize local SQLite DB
       try {
         await initDatabase();
@@ -194,10 +234,13 @@ export default function App() {
 
       // 4) Ensure till flag is correct after init
       refreshTillFlag();
+
+      // 5) ✅ If online at startup, refresh auth once (instant user update)
+      refreshAuthNow("startup");
     })();
 
-    // 5) Internet status watcher + clock/till sync
-    const unsub = NetInfo.addEventListener((state) => {
+    // 6) Internet status watcher + clock/till sync + permission refresh
+    const unsubNetInfo = NetInfo.addEventListener((state) => {
       const isOnline = !!state.isConnected && !!state.isInternetReachable;
       setOnline(isOnline);
 
@@ -206,15 +249,43 @@ export default function App() {
         syncClockAndTill().catch((e) =>
           console.log("syncClockAndTill failed", e)
         );
+
+        // ✅ Refresh permissions/profile from backend (GET /auth/me)
+        refreshAuthNow("became-online");
+      }
+    });
+
+    // 7) ✅ Foreground refresh: when user returns to app, pull latest perms immediately
+    const unsubAppState = AppState.addEventListener("change", (state) => {
+      if (state === "active") {
+        refreshAuthNow("foreground");
       }
     });
 
     return () => {
-      unsub();
+      unsubNetInfo();
+      unsubAppState.remove();
       // global WS stays alive for app lifecycle; no explicit cleanup
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // =======================================================
+  // ✅ ONLINE "instant-ish" user updates (poll safety-net)
+  // =======================================================
+  // If you don't yet broadcast WS event for auth changes, this ensures
+  // the app still updates within a few seconds while online.
+  useEffect(() => {
+    if (!online) return;
+
+    // refresh quickly, but not too aggressive
+    const timer = setInterval(() => {
+      refreshAuthNow("online-poll");
+    }, 8000);
+
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [online]);
 
   // ⛔️ IMPORTANT: all hooks are above this line
   if (screen === null) return null;

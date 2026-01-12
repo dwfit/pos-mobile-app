@@ -169,6 +169,12 @@ export default function HomeScreen({ navigation, online }: any) {
     setSyncDialog({ visible: true, tone, title, message });
   }
 
+  //wire permission for cash access register
+  function canAccessCashRegister(perms: string[]) {
+    return Array.isArray(perms) && perms.includes("pos.cashRegister");
+  }
+  
+
   useEffect(() => {
     (async () => {
       try {
@@ -348,31 +354,39 @@ export default function HomeScreen({ navigation, online }: any) {
         setPin("");
         return;
       }
-
+  
       try {
         setLoading(true);
-
+  
         const res: any = await post("/auth/login-pin", { pin: p, branchId });
-
+  
         setPin("");
-
+  
         const permissions: string[] = Array.isArray(res.permissions) ? res.permissions : [];
-
+  
+        // 🔐 Access Cash Register gate (ONLINE)
+        if (!canAccessCashRegister(permissions)) {
+          await clearAllTokens(); // optional (recommended)
+          showDialog("error", "Access denied", "You dont have access, contact your administrator");
+          setPin("");
+          return;
+        }
+  
         const accessToken =
           typeof res.accessToken === "string"
             ? res.accessToken
             : typeof res.token === "string"
-              ? res.token
-              : null;
-
+            ? res.token
+            : null;
+  
         const refreshToken = typeof res.refreshToken === "string" ? res.refreshToken : null;
-
+  
         if (accessToken && refreshToken) {
           await saveTokens(accessToken, refreshToken);
         }
-
+  
         const branchObj = res.branch ?? { id: branchId, name: branchName ?? "" };
-
+  
         const userPayload: LocalUser = {
           id: res.id,
           name: res.name,
@@ -382,12 +396,12 @@ export default function HomeScreen({ navigation, online }: any) {
           branchId: branchObj?.id ?? branchId,
           permissions,
         };
-
+  
         await AsyncStorage.multiSet([
           ["pos_user", JSON.stringify(userPayload)],
           ["pos_branch", JSON.stringify(branchObj)],
         ]);
-
+  
         try {
           await saveUsersToSQLite(
             [
@@ -407,7 +421,7 @@ export default function HomeScreen({ navigation, online }: any) {
         } catch (cacheErr) {
           console.log("Cache single user (online login) err:", cacheErr);
         }
-
+  
         navigation.reset({
           index: 0,
           routes: [
@@ -439,7 +453,7 @@ export default function HomeScreen({ navigation, online }: any) {
     },
     [branchId, branchName, navigation]
   );
-
+  
   const loginWithPinOffline = useCallback(
     async (p: string) => {
       if (!branchId) {
@@ -450,10 +464,10 @@ export default function HomeScreen({ navigation, online }: any) {
         setPin("");
         return;
       }
-
+  
       try {
         setLoading(true);
-
+  
         const user = await findLocalUserByPin(branchId, p);
         if (!user) {
           setPin("");
@@ -463,10 +477,19 @@ export default function HomeScreen({ navigation, online }: any) {
           );
           return;
         }
-
+  
+        const permissions: string[] = Array.isArray(user.permissions) ? user.permissions : [];
+  
+        // 🔐 Access Cash Register gate (OFFLINE)
+        if (!canAccessCashRegister(permissions)) {
+          showDialog("error", "Access denied", "You dont have access, contact your administrator");
+          setPin("");
+          return;
+        }
+  
         const branchRaw = await AsyncStorage.getItem("pos_branch");
         const branchObj = branchRaw ? JSON.parse(branchRaw) : null;
-
+  
         await AsyncStorage.setItem(
           "pos_user",
           JSON.stringify({
@@ -476,10 +499,10 @@ export default function HomeScreen({ navigation, online }: any) {
             appRole: user.appRole,
             roleName: user.roleName,
             branchId: user.branchId ?? branchId,
-            permissions: user.permissions ?? [],
+            permissions,
           } as LocalUser)
         );
-
+  
         navigation.reset({
           index: 0,
           routes: [
@@ -493,7 +516,7 @@ export default function HomeScreen({ navigation, online }: any) {
             },
           ],
         });
-
+  
         setPin("");
       } catch (err) {
         console.log("OFFLINE LOGIN ERR", err);
@@ -505,6 +528,7 @@ export default function HomeScreen({ navigation, online }: any) {
     },
     [branchId, branchName, navigation]
   );
+  
 
   const loginWithPin = useCallback(
     async (p: string) => {

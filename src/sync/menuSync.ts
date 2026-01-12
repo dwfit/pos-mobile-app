@@ -168,7 +168,7 @@ export async function syncMenu(opts: SyncMenuOpts) {
         p.name,
         price,
         p.imageUrl ?? null,
-        toSqliteBoolActive(p.isActive) // ✅ FIX (default = 1)
+        toSqliteBoolActive(p.isActive)
       );
     }
 
